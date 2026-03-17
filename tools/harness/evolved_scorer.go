@@ -61,7 +61,7 @@ func (s *EvolvedScorer) Category() scheduling.ScorerCategory {
 }
 
 // Score translates production endpoint metrics to sim types, runs the evolved algorithm,
-// and returns per-endpoint scores in [0, 1].
+// and returns per-endpoint scores from the evolved algorithm; values are not clamped to [0, 1] and may be negative when KV utilization is high (KV penalty is subtractive).
 //
 // Endpoints with nil metrics receive score 0.0 (defensive nil guard, matches BLISWeightedScorer).
 // Empty endpoint list returns an empty (non-nil) map.

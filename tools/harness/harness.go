@@ -53,7 +53,7 @@ type summarySignal struct {
 // LoadAlgorithm loads an evolved algorithm by verifying the EVOLVE-BLOCK content hash.
 // summaryPath: path to workspace/algorithm_summary.json
 // repoRoot: repository root for resolving relative source paths
-// Returns: Algorithm interface wrapping a trivial scorer (PR3); PR5 extends with full evolved logic.
+// Returns: Algorithm interface wrapping evolvedAlgorithm, which implements the full EVOLVE-BLOCK logic (KV penalty + inflight tiebreaker) from blis_router/best/best_program.go.
 func LoadAlgorithm(summaryPath, repoRoot string) (Algorithm, error) {
 	data, err := os.ReadFile(summaryPath)
 	if err != nil {
@@ -130,8 +130,7 @@ func LoadAlgorithm(summaryPath, repoRoot string) (Algorithm, error) {
 	return newEvolvedAlgorithm(), nil
 }
 
-// trivialAlgorithm is a placeholder that scores by 1/(1+EffectiveLoad).
-// PR5 replaces this with the actual evolved algorithm scorer.
+// trivialAlgorithm is a retained reference implementation. It is no longer used by LoadAlgorithm (replaced by evolvedAlgorithm in this PR).
 type trivialAlgorithm struct{}
 
 func (a *trivialAlgorithm) Route(req *sim.Request, state *sim.RouterState) sim.RoutingDecision {

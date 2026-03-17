@@ -1,6 +1,8 @@
 package harness
 
 import (
+	"fmt"
+
 	sim "github.com/inference-sim/inference-sim/sim"
 )
 
@@ -69,6 +71,10 @@ func (a *evolvedAlgorithm) Route(req *sim.Request, state *sim.RouterState) sim.R
 	// Step 1: Delegate to base WeightedScoring for composite scores.
 	// base.Route fires observer callbacks (prefix-affinity history) as a side effect.
 	baseDecision := a.base.Route(req, state)
+
+	if len(baseDecision.Scores) == 0 {
+		panic(fmt.Sprintf("evolvedAlgorithm.Route: base.Route returned empty Scores map for %d snapshots", len(snapshots)))
+	}
 
 	// Step 2: Apply EVOLVE-BLOCK techniques 2 and 3 to produce final scores.
 	// Operate on a copy so we don't mutate the base decision's map.
