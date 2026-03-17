@@ -20,12 +20,10 @@ import (
 // is nil, causing all prefix-affinity scores to be 0.0 (totalBlocks==0 → no match).
 // Since bestPrefixScore is always 0.0 ≤ 0.1, the decay branch never fires.
 //
-// IMPORTANT: sim.NewRoutingPolicy("weighted", ...) returns a WeightedScoring
-// whose Route() method IS the full EVOLVE-BLOCK, including techniques 2
-// (KV pressure penalty) and 3 (inflight tiebreaker). Delegating to a.base.Route()
-// therefore runs all three techniques in one call. The scores returned in
-// baseDecision.Scores already have the KV penalty subtracted and the tiebreaker
-// added — do NOT re-apply them after calling a.base.Route().
+// IMPORTANT: sim.NewRoutingPolicy("weighted", ...) from inference-sim does NOT
+// include techniques 2 (KV pressure penalty) and 3 (inflight tiebreaker) —
+// those are in the EVOLVE-BLOCK of blis_router/best/best_program.go.
+// This harness implementation applies them explicitly after calling base.Route().
 //
 // NOTE: This implementation does NOT use CacheHitRate, SessionID, or
 // EffectiveLoad() directly (none are accessed in the new EVOLVE-BLOCK).
@@ -44,44 +42,50 @@ func newEvolvedAlgorithm() *evolvedAlgorithm {
 	}
 }
 
-// Route implements Algorithm. It runs the EVOLVE-BLOCK logic by delegating to
-// a.base (sim.NewRoutingPolicy("weighted", ...)), whose Route() method IS the
-// full EVOLVE-BLOCK including:
-//  1. Adaptive prefix-affinity decay (never fires in Suite A; InputTokens=nil).
-//  2. KV pressure penalty: subtract 0.5*(KVUtil-0.9)/0.1 when KVUtil > 0.9.
-//  3. Fresh load tiebreaker: add 0.01/(1+InFlightRequests).
-// The returned baseDecision.Scores already have all three techniques applied.
-// The argmax here selects the winner and relabels the decision as "evolved".
+// Route implements Algorithm. It runs the EVOLVE-BLOCK logic:
+//  1. Calls base WeightedScoring to get composite scores from prefix-affinity,
+//     queue-depth, and kv-utilization scorers.
+//  2. Applies KV pressure penalty: scores[id] -= 0.5*(KVUtil-0.9)/0.1 when KVUtil > 0.9.
+//  3. Applies fresh load tiebreaker: scores[id] += 0.01/(1+InFlightRequests).
+//  4. Argmax with first-wins tie-breaking. Relabels decision as "evolved".
 //
-// WARNING — observer-callback / prefix-affinity history poisoning:
-// The call to a.base.Route() below fires WeightedScoring's internal observer
-// callbacks, which record the final post-EVOLVE-BLOCK routing decision (the
-// argmax after KV penalty and tiebreaker are applied) in the prefix-affinity
-// scorer's session history — this is the actual evolved target, not a stale
-// base-only argmax. In Suite A canonical tuples sim.Request.InputTokens is nil,
-// so all prefix-affinity scores are 0.0 (totalBlocks==0 → no match) and the
-// observer records no preference; the callback is harmless in that case.
-// However, future test authors who construct requests with non-nil InputTokens
-// must be aware: if the KV pressure penalty changes the argmax relative to a
-// purely prefix-affinity-driven choice, the observer records the KV-adjusted
-// target, which then influences prefix-affinity scores for subsequent requests
-// in the same session. This is correct behavior (the observer records the actual
-// routing target), but it can cause surprising prefix-affinity score drift in
-// multi-request session tests.
+// Note: Adaptive prefix-affinity decay (technique 1 in blis_router EVOLVE-BLOCK) is
+// omitted. In Suite A canonical tuples, sim.Request.InputTokens is nil, causing all
+// prefix-affinity scores to be 0.0 (totalBlocks==0 → no match), so the decay branch
+// never fires.
+//
+// WARNING — observer-callback / prefix-affinity history:
+// The call to a.base.Route() fires WeightedScoring's observer callbacks, recording
+// the base argmax (before penalty and tiebreaker) in prefix-affinity history. In Suite
+// A canonical tuples this is harmless (InputTokens=nil, no prefix preference recorded).
+// Future test authors constructing requests with non-nil InputTokens should be aware
+// that the observer records the base argmax, not the post-penalty argmax.
 func (a *evolvedAlgorithm) Route(req *sim.Request, state *sim.RouterState) sim.RoutingDecision {
 	snapshots := state.Snapshots
 	if len(snapshots) == 0 {
 		panic("evolvedAlgorithm.Route: empty snapshots")
 	}
 
-	// Step 1: Delegate to base WeightedScoring, which IS the full EVOLVE-BLOCK.
-	// baseDecision.Scores already contains scores with KV penalty (technique 2)
-	// and inflight tiebreaker (technique 3) applied — do NOT re-apply them.
+	// Step 1: Delegate to base WeightedScoring for composite scores.
+	// base.Route fires observer callbacks (prefix-affinity history) as a side effect.
 	baseDecision := a.base.Route(req, state)
 
-	// Step 2: Argmax over the already-final scores — select instance with highest
-	// score (first wins on tie). Relabel the decision as "evolved".
-	scores := baseDecision.Scores
+	// Step 2: Apply EVOLVE-BLOCK techniques 2 and 3 to produce final scores.
+	// Operate on a copy so we don't mutate the base decision's map.
+	scores := make(map[string]float64, len(snapshots))
+	for id, s := range baseDecision.Scores {
+		scores[id] = s
+	}
+	for _, snap := range snapshots {
+		// Technique 2: KV pressure penalty (subtractive). Fires strictly at KVUtil > 0.9.
+		if snap.KVUtilization > 0.9 {
+			scores[snap.ID] -= 0.5 * (snap.KVUtilization - 0.9) / 0.1
+		}
+		// Technique 3: Fresh load tiebreaker — favor lower in-flight count.
+		scores[snap.ID] += 0.01 / (1.0 + float64(snap.InFlightRequests))
+	}
+
+	// Step 3: Argmax over final scores — first wins on tie. Relabel as "evolved".
 	bestScore := scores[snapshots[0].ID]
 	bestIdx := 0
 	for i, snap := range snapshots[1:] {

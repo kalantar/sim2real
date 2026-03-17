@@ -63,12 +63,12 @@ func TestStaleHashAbortsParsing(t *testing.T) {
 	workspaceDir := t.TempDir()
 
 	// Create source file with EVOLVE-BLOCK
-	sourceDir := filepath.Join(repoRoot, "routing")
+	sourceDir := filepath.Join(repoRoot, "blis_router", "best")
 	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	originalSource := "line1\n// EVOLVE-BLOCK-START\noriginal logic\n// EVOLVE-BLOCK-END\nline5"
-	sourcePath := filepath.Join(sourceDir, "best_program.py")
+	sourcePath := filepath.Join(sourceDir, "best_program.go")
 	if err := os.WriteFile(sourcePath, []byte(originalSource), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func TestStaleHashAbortsParsing(t *testing.T) {
 	// Write algorithm_summary.json with the original hash
 	summary := map[string]interface{}{
 		"algorithm_name":             "test",
-		"evolve_block_source":        "routing/best_program.py:2-4",
+		"evolve_block_source":        "blis_router/best/best_program.go:2-4",
 		"evolve_block_content_hash":  originalHash,
 		"signals":                    []interface{}{},
 		"composite_signals":          []interface{}{},
@@ -186,7 +186,7 @@ func TestUnknownSignalTypeRejection(t *testing.T) {
 	// Cross-PR contract #3: signals with type "unknown" must be rejected
 	summaryJSON := map[string]interface{}{
 		"algorithm_name":             "test",
-		"evolve_block_source":        "routing/best_program.py:1-1",
+		"evolve_block_source":        "blis_router/best/best_program.go:1-1",
 		"evolve_block_content_hash":  "deadbeef",
 		"signals": []interface{}{
 			map[string]interface{}{
@@ -221,10 +221,10 @@ func TestCrossLanguageHashConsistency(t *testing.T) {
 		t.Skip("requires Python venv at .venv/bin/python")
 	}
 
-	// Use the actual routing/best_program.py and run extract
-	routingDir := filepath.Join(repoRoot, "routing")
-	if _, err := os.Stat(filepath.Join(routingDir, "best_program.py")); err != nil {
-		t.Skip("requires routing/best_program.py")
+	// Use the actual blis_router/best/best_program.go and run extract
+	routingDir := filepath.Join(repoRoot, "blis_router", "best")
+	if _, err := os.Stat(filepath.Join(routingDir, "best_program.go")); err != nil {
+		t.Skip("requires blis_router/best/best_program.go")
 	}
 
 	// Run extract to get the Python-computed hash.
@@ -357,10 +357,10 @@ func TestLoadAlgorithmReturnsEvolved(t *testing.T) {
 		t.Errorf("expected 'light' (lower load), got %q", decision.TargetInstance)
 	}
 
-	// BC-3: KV pressure penalty fires when KVUtilization > 0.82
+	// BC-3: KV pressure penalty fires when KVUtilization > 0.9 (new threshold)
 	kvState := sim.RouterState{
 		Snapshots: []sim.RoutingSnapshot{
-			{ID: "high-kv", QueueDepth: 0, KVUtilization: 0.90},
+			{ID: "high-kv", QueueDepth: 0, KVUtilization: 0.95},
 			{ID: "low-kv",  QueueDepth: 0, KVUtilization: 0.50},
 		},
 	}
@@ -375,14 +375,14 @@ func TestLoadAlgorithmReturnsEvolved(t *testing.T) {
 }
 
 // TestEvolvedAlgorithmSingleEndpoint verifies that a single endpoint still receives
-// a non-zero score and that the KV penalty fires correctly when KVUtilization > 0.82.
+// a score and that the KV penalty fires correctly when KVUtilization > 0.9.
 // BC-I11: single-endpoint edge case.
 func TestEvolvedAlgorithmSingleEndpoint(t *testing.T) {
 	alg := newEvolvedAlgorithm()
 
 	state := sim.RouterState{
 		Snapshots: []sim.RoutingSnapshot{
-			{ID: "solo", QueueDepth: 0, InFlightRequests: 0, KVUtilization: 0.90},
+			{ID: "solo", QueueDepth: 0, InFlightRequests: 0, KVUtilization: 0.95},
 		},
 	}
 	decision := alg.Route(&sim.Request{ID: "r-single"}, &state)
@@ -391,26 +391,30 @@ func TestEvolvedAlgorithmSingleEndpoint(t *testing.T) {
 	if !ok {
 		t.Fatal("expected score for 'solo' endpoint, got none")
 	}
-	if score <= 0.0 {
-		t.Errorf("expected positive score for sole endpoint, got %f", score)
+	// KV penalty fires: scores[id] -= 0.5*(0.95-0.9)/0.1 = 0.25 (subtractive).
+	// Base WeightedScoring score at KVUtil=0.95 ≈ 0.324; tiebreaker adds 0.01/(1+0)=0.01.
+	// Unpenalized total ≈ 0.334; penalized ≈ 0.334 - 0.25 = 0.084.
+	// Assert score < 0.3 (strictly below the unpenalized base ~0.334) to verify the penalty
+	// actually fired — score < 1.0 alone is vacuously true with or without the penalty.
+	// NOTE: do NOT assert score > 0.0; subtractive penalty can produce negative scores.
+	if score >= 0.3 {
+		t.Errorf("expected score < 0.3 (KV penalty fired: 0.5*(0.95-0.9)/0.1=0.25 subtracted from base ~0.334), got %f", score)
 	}
-	// KV penalty fires: max(0.3, 1-(0.90-0.82)*2) = max(0.3, 0.84) = 0.84
-	// Base score may vary but the KV penalty multiplies it down from 1.0.
-	if score >= 1.0 {
-		t.Errorf("expected score < 1.0 (KV penalty applied), got %f", score)
+	if decision.TargetInstance != "solo" {
+		t.Errorf("expected TargetInstance='solo' (only endpoint), got %q", decision.TargetInstance)
 	}
 }
 
 // TestEvolvedAlgorithmKVPenaltyBoundary verifies that the KV penalty does NOT fire
-// at exactly KVUtilization=0.82 (condition is strictly > 0.82).
+// at exactly KVUtilization=0.9 (condition is strictly > 0.9).
 // BC-I12: penalty boundary condition.
 func TestEvolvedAlgorithmKVPenaltyBoundary(t *testing.T) {
 	alg := newEvolvedAlgorithm()
 
 	state := sim.RouterState{
 		Snapshots: []sim.RoutingSnapshot{
-			{ID: "ep-0", QueueDepth: 0, InFlightRequests: 0, KVUtilization: 0.82},
-			{ID: "ep-1", QueueDepth: 0, InFlightRequests: 0, KVUtilization: 0.82},
+			{ID: "ep-0", QueueDepth: 0, InFlightRequests: 0, KVUtilization: 0.9},
+			{ID: "ep-1", QueueDepth: 0, InFlightRequests: 0, KVUtilization: 0.9},
 		},
 	}
 	decision := alg.Route(&sim.Request{ID: "r-boundary"}, &state)
@@ -421,7 +425,7 @@ func TestEvolvedAlgorithmKVPenaltyBoundary(t *testing.T) {
 		t.Fatalf("expected scores for both endpoints; ep-0 ok=%v ep-1 ok=%v", ok0, ok1)
 	}
 	if score0 != score1 {
-		t.Errorf("expected equal scores at KV=0.82 (penalty does not fire); got ep-0=%f ep-1=%f", score0, score1)
+		t.Errorf("expected equal scores at KV=0.9 (penalty does not fire); got ep-0=%f ep-1=%f", score0, score1)
 	}
 }
 
@@ -483,7 +487,8 @@ func TestEvolvedScorerContract(t *testing.T) {
 }
 
 func TestEvolvedScorerScoresCorrectly(t *testing.T) {
-	// BC-4: metric translation; BC-5: session header.
+	// Verifies metric translation: WaitingQueueSize/RunningRequestsSize/KVCacheUsagePercent → sim fields.
+	// Also verifies Score() handles a request with session headers without error.
 	alg := newEvolvedAlgorithm()
 	scorer := NewEvolvedScorer(alg).WithName("test")
 
@@ -491,7 +496,7 @@ func TestEvolvedScorerScoresCorrectly(t *testing.T) {
 		id: "heavy",
 		metrics: &fwkdl.Metrics{
 			WaitingQueueSize:    5,
-			RunningRequestsSize: 3, // EffectiveLoad=8 → hard penalty (load>7)
+			RunningRequestsSize: 3, // higher load → lower base score from WeightedScoring
 			KVCacheUsagePercent: 50.0,
 		},
 	}
@@ -512,7 +517,9 @@ func TestEvolvedScorerScoresCorrectly(t *testing.T) {
 		t.Errorf("expected light > heavy; got heavy=%f light=%f", scores[heavy], scores[light])
 	}
 
-	// BC-5: session header extraction
+	// Verify Score() handles a request with session headers (no error expected).
+	// Note: evolved_scorer.go no longer extracts SessionID from headers (removed in Task 5).
+	// This sub-block tests that the scorer is robust to irrelevant headers.
 	req := &scheduling.LLMRequest{
 		RequestId: "req-sess",
 		Headers:   map[string]string{"x-session-token": "sess-abc"},
@@ -537,12 +544,12 @@ func TestLoadAlgorithmErrorPaths(t *testing.T) {
 	workspaceDir := t.TempDir()
 
 	// Create a valid source file for cases that need it
-	sourceDir := filepath.Join(repoRoot, "routing")
+	sourceDir := filepath.Join(repoRoot, "blis_router", "best")
 	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	sourceContent := "line1\n// EVOLVE-BLOCK-START\nlogic\n// EVOLVE-BLOCK-END\nline5"
-	if err := os.WriteFile(filepath.Join(sourceDir, "best_program.py"), []byte(sourceContent), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(sourceDir, "best_program.go"), []byte(sourceContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -553,7 +560,7 @@ func TestLoadAlgorithmErrorPaths(t *testing.T) {
 	}{
 		{
 			name:    "missing content hash",
-			summary: map[string]interface{}{"evolve_block_source": "routing/best_program.py:2-4", "evolve_block_content_hash": "", "signals": []interface{}{}},
+			summary: map[string]interface{}{"evolve_block_source": "blis_router/best/best_program.go:2-4", "evolve_block_content_hash": "", "signals": []interface{}{}},
 			wantErr: "missing required field 'evolve_block_content_hash'",
 		},
 		{
@@ -563,7 +570,7 @@ func TestLoadAlgorithmErrorPaths(t *testing.T) {
 		},
 		{
 			name:    "invalid source format (no colon)",
-			summary: map[string]interface{}{"evolve_block_source": "routing/best_program.py", "evolve_block_content_hash": "abc123", "signals": []interface{}{}},
+			summary: map[string]interface{}{"evolve_block_source": "blis_router/best/best_program.go", "evolve_block_content_hash": "abc123", "signals": []interface{}{}},
 			wantErr: "invalid evolve_block_source format",
 		},
 		{
@@ -573,22 +580,22 @@ func TestLoadAlgorithmErrorPaths(t *testing.T) {
 		},
 		{
 			name:    "invalid line range format",
-			summary: map[string]interface{}{"evolve_block_source": "routing/best_program.py:2", "evolve_block_content_hash": "abc123", "signals": []interface{}{}},
+			summary: map[string]interface{}{"evolve_block_source": "blis_router/best/best_program.go:2", "evolve_block_content_hash": "abc123", "signals": []interface{}{}},
 			wantErr: "invalid line range format",
 		},
 		{
 			name:    "invalid start line",
-			summary: map[string]interface{}{"evolve_block_source": "routing/best_program.py:abc-4", "evolve_block_content_hash": "abc123", "signals": []interface{}{}},
+			summary: map[string]interface{}{"evolve_block_source": "blis_router/best/best_program.go:abc-4", "evolve_block_content_hash": "abc123", "signals": []interface{}{}},
 			wantErr: "invalid start line",
 		},
 		{
 			name:    "invalid end line",
-			summary: map[string]interface{}{"evolve_block_source": "routing/best_program.py:2-xyz", "evolve_block_content_hash": "abc123", "signals": []interface{}{}},
+			summary: map[string]interface{}{"evolve_block_source": "blis_router/best/best_program.go:2-xyz", "evolve_block_content_hash": "abc123", "signals": []interface{}{}},
 			wantErr: "invalid end line",
 		},
 		{
 			name:    "line range out of bounds",
-			summary: map[string]interface{}{"evolve_block_source": "routing/best_program.py:1-999", "evolve_block_content_hash": "abc123", "signals": []interface{}{}},
+			summary: map[string]interface{}{"evolve_block_source": "blis_router/best/best_program.go:1-999", "evolve_block_content_hash": "abc123", "signals": []interface{}{}},
 			wantErr: "line range 1-999 out of bounds",
 		},
 	}
@@ -611,6 +618,46 @@ func TestLoadAlgorithmErrorPaths(t *testing.T) {
 				t.Errorf("expected error containing %q, got: %v", tc.wantErr, err)
 			}
 		})
+	}
+}
+
+// TestEvolvedAlgorithmInflightTiebreaker verifies BC-5: the 0.01/(1+InFlightRequests)
+// tiebreaker favors the endpoint with fewer in-flight requests when all other scoring
+// factors are equal.
+//
+// ISOLATION DESIGN: InFlightRequests feeds into EffectiveLoad (QueueDepth + BatchSize +
+// InFlightRequests), which the base WeightedScoring load-balance scorer uses. Setting
+// InFlightRequests=0 vs 5 with QueueDepth=0 for both would make EffectiveLoad 0 vs 5,
+// causing large base score differences that mask the tiebreaker. To isolate the
+// tiebreaker, we compensate with QueueDepth so EffectiveLoad is equal:
+//   idle:  QueueDepth=5, InFlightRequests=0 → EffectiveLoad=5
+//   busy:  QueueDepth=0, InFlightRequests=5 → EffectiveLoad=5
+// Equal EffectiveLoad → equal base scores from load-balance scorer.
+// Equal KV=0.0 → equal base scores from kv-utilization scorer.
+// InputTokens=nil → prefix-affinity scores 0.0 for both.
+// Only the tiebreaker term (0.01/(1+InFlightRequests)) then differentiates the scores.
+func TestEvolvedAlgorithmInflightTiebreaker(t *testing.T) {
+	alg := newEvolvedAlgorithm()
+	state := sim.RouterState{
+		Snapshots: []sim.RoutingSnapshot{
+			// idle: QueueDepth=5, InFlightRequests=0 → EffectiveLoad=5 (equal to busy)
+			{ID: "idle", QueueDepth: 5, InFlightRequests: 0, KVUtilization: 0.0},
+			// busy: QueueDepth=0, InFlightRequests=5 → EffectiveLoad=5 (equal to idle)
+			{ID: "busy", QueueDepth: 0, InFlightRequests: 5, KVUtilization: 0.0},
+		},
+	}
+	decision := alg.Route(&sim.Request{}, &state)
+	scores := decision.Scores
+	if scores["idle"] <= scores["busy"] {
+		t.Errorf("expected idle (InFlight=0) score > busy (InFlight=5) score; got idle=%f busy=%f",
+			scores["idle"], scores["busy"])
+	}
+	// Verify tiebreaker magnitudes: 0.01/(1+0)=0.01 vs 0.01/(1+5)≈0.00167.
+	// With equal base scores, the diff should be close to the tiebreaker delta alone.
+	expectedIdle := 0.01 / (1.0 + 0)
+	expectedBusy := 0.01 / (1.0 + 5)
+	if diff := scores["idle"] - scores["busy"]; diff < (expectedIdle-expectedBusy)*0.99 {
+		t.Errorf("tiebreaker delta too small: got %f, expected ~%f", diff, expectedIdle-expectedBusy)
 	}
 }
 
