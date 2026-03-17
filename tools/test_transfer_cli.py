@@ -1352,7 +1352,7 @@ def test_benchmark_mechanism_check_fail(tmp_path):
 
 
 def test_benchmark_requires_t_eff(tmp_path):
-    """BC-17: missing --t-eff → exit 1."""
+    """BC-17: missing --t-eff → exit 2 (infrastructure error, not FAIL verdict)."""
     results_file = tmp_path / "results.json"
     results_file.write_text('{"workloads": []}')
 
@@ -1362,7 +1362,7 @@ def test_benchmark_requires_t_eff(tmp_path):
          "--results", str(results_file)],  # no --t-eff
         capture_output=True, text=True, env=env
     )
-    assert result.returncode == 1
+    assert result.returncode == 2
     output = json.loads(result.stdout)
     assert "t-eff" in output["errors"][0].lower()
 

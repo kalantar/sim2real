@@ -58,6 +58,8 @@ Record P50/P95/P99 latency **per request** (not per workload). Run exactly 5 tot
 
 The `runs` array must contain exactly 5 entries (one per baseline request). The `noise-characterize` command computes CV and T_eff from these entries; an incorrect count will skew thresholds.
 
+**Format note:** The `baseline_runs.json` format stores one entry per benchmark run (not per workload). Collect 5 runs total across all workloads in a single benchmark pass — e.g., one run covers all workload metrics. An operator with 3 workload files still produces 5 `runs[]` entries, not 15.
+
 Then compute CV and T_eff:
 
 ```bash

@@ -945,13 +945,21 @@ def _cmd_noise_characterize(args: argparse.Namespace) -> int:
         return _output("error", 2, errors=[f"runs file not found: {args.runs}"],
                        per_metric_cv={}, t_eff=0.0, halt=False)
 
-    if runs_path.stat().st_size > MAX_FILE_SIZE:
+    try:
+        if runs_path.stat().st_size > MAX_FILE_SIZE:
+            return _output("error", 2,
+                           errors=[f"runs file exceeds {MAX_FILE_SIZE} bytes: {args.runs}"],
+                           per_metric_cv={}, t_eff=0.0, halt=False)
+    except OSError as e:
         return _output("error", 2,
-                       errors=[f"runs file exceeds {MAX_FILE_SIZE} bytes: {args.runs}"],
+                       errors=[f"cannot stat runs file '{args.runs}': {e}"],
                        per_metric_cv={}, t_eff=0.0, halt=False)
 
     try:
         data = json.loads(runs_path.read_text())
+    except OSError as e:
+        return _output("error", 2, errors=[f"cannot read runs file '{args.runs}': {e}"],
+                       per_metric_cv={}, t_eff=0.0, halt=False)
     except json.JSONDecodeError as e:
         return _output("error", 2, errors=[f"invalid JSON in {args.runs}: {e}"],
                        per_metric_cv={}, t_eff=0.0, halt=False)
@@ -974,6 +982,7 @@ def _cmd_noise_characterize(args: argparse.Namespace) -> int:
         values = [r[metric] for r in runs if isinstance(r, dict) and metric in r
                   and isinstance(r[metric], (int, float)) and r[metric] > 0]
         if len(values) < 2:
+            print(f"WARNING: metric '{metric}' has {len(values)} valid data point(s) (need ≥2), skipping from CV computation", file=sys.stderr)
             continue
 
         mean = sum(values) / len(values)
@@ -1015,55 +1024,64 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
 
     Exit codes:
         0 = success (PASS or INCONCLUSIVE — operator must check mechanism_check_verdict)
-        1 = validation failure (FAIL verdict or missing --t-eff)
-        2 = infrastructure error (file missing or invalid JSON)
+        1 = validation failure (FAIL verdict)
+        2 = infrastructure error (file missing, invalid JSON, or missing --t-eff)
     """
     if args.t_eff is None:
-        return _output("error", 1,
+        return _output("error", 2,
                        errors=["--t-eff required: run noise-characterize first"],
-                       mechanism_check_verdict="FAIL", results=[])
+                       mechanism_check_verdict="FAIL", workload_classification=[])
 
     t_eff = args.t_eff
     if t_eff <= 0:
-        return _output("error", 1,
+        return _output("error", 2,
                        errors=[f"--t-eff must be > 0, got {t_eff}. "
                                "noise-characterize guarantees T_eff >= 0.05; "
                                "a non-positive value indicates manual override error."],
-                       mechanism_check_verdict="FAIL", results=[])
+                       mechanism_check_verdict="FAIL", workload_classification=[])
 
     results_path = Path(args.results).resolve()
     allowed_root = Path(os.environ["_SIM2REAL_ALLOWED_ROOT"]).resolve() if "_SIM2REAL_ALLOWED_ROOT" in os.environ else REPO_ROOT
     if not results_path.is_relative_to(allowed_root):
         return _output("error", 2,
                        errors=[f"Results path '{results_path}' is outside allowed root '{allowed_root}'."],
-                       mechanism_check_verdict="FAIL", results=[])
+                       mechanism_check_verdict="FAIL", workload_classification=[])
     if not results_path.exists():
         return _output("error", 2,
                        errors=[f"results file not found: {args.results}"],
-                       mechanism_check_verdict="FAIL", results=[])
+                       mechanism_check_verdict="FAIL", workload_classification=[])
 
-    if results_path.stat().st_size > MAX_FILE_SIZE:
+    try:
+        if results_path.stat().st_size > MAX_FILE_SIZE:
+            return _output("error", 2,
+                           errors=[f"results file exceeds {MAX_FILE_SIZE} bytes: {args.results}"],
+                           mechanism_check_verdict="FAIL", workload_classification=[])
+    except OSError as e:
         return _output("error", 2,
-                       errors=[f"results file exceeds {MAX_FILE_SIZE} bytes: {args.results}"],
-                       mechanism_check_verdict="FAIL", results=[])
+                       errors=[f"cannot stat results file '{args.results}': {e}"],
+                       mechanism_check_verdict="FAIL", workload_classification=[])
 
     try:
         data = json.loads(results_path.read_text())
+    except OSError as e:
+        return _output("error", 2,
+                       errors=[f"cannot read results file '{args.results}': {e}"],
+                       mechanism_check_verdict="FAIL", workload_classification=[])
     except json.JSONDecodeError as e:
         return _output("error", 2,
                        errors=[f"invalid JSON in {args.results}: {e}"],
-                       mechanism_check_verdict="FAIL", results=[])
+                       mechanism_check_verdict="FAIL", workload_classification=[])
 
     if not isinstance(data, dict) or "workloads" not in data:
         return _output("error", 2,
                        errors=["missing 'workloads' key in input JSON"],
-                       mechanism_check_verdict="FAIL", results=[])
+                       mechanism_check_verdict="FAIL", workload_classification=[])
 
     workloads = data["workloads"]
     if not isinstance(workloads, list):
         return _output("error", 2,
                        errors=["'workloads' must be a list"],
-                       mechanism_check_verdict="FAIL", results=[])
+                       mechanism_check_verdict="FAIL", workload_classification=[])
 
     results = []
     matched_improvements = []
@@ -1111,9 +1129,9 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
             errors.append(f"unrecognized classification value: {classification!r} for workload {name!r}")
 
     if not matched_improvements:
-        return _output("error", 1,
-                       errors=["no matched workloads found — cannot compute mechanism check"],
-                       mechanism_check_verdict="FAIL", results=results,
+        return _output("error", 2,
+                       errors=["no matched workloads found — cannot compute mechanism check (configuration error: check workload classification)"],
+                       workload_classification=results,
                        t_eff=t_eff, specificity_failures=specificity_failures)
 
     # Mechanism check
@@ -1133,7 +1151,7 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
 
     passed = verdict == "PASS"
     return _output(status, exit_code, mechanism_check_verdict=verdict, passed=passed,
-                   results=results, t_eff=t_eff, specificity_failures=specificity_failures,
+                   workload_classification=results, t_eff=t_eff, specificity_failures=specificity_failures,
                    errors=errors)
 
 
