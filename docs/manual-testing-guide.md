@@ -12,7 +12,7 @@ All commands assume you are in the repo root (`sim2real/`).
 ### 1.1 Extract command — happy path
 
 ```bash
-.venv/bin/python tools/transfer_cli.py extract routing/
+.venv/bin/python tools/transfer_cli.py extract blis_router/best/
 ```
 
 **Verify:**
@@ -31,7 +31,7 @@ All commands assume you are in the repo root (`sim2real/`).
 ### 1.3 Extract — strict mode
 
 ```bash
-.venv/bin/python tools/transfer_cli.py extract --strict routing/
+.venv/bin/python tools/transfer_cli.py extract --strict blis_router/best/
 ```
 
 **Verify:** Same as 1.1, plus stricter fidelity checks pass.
@@ -40,8 +40,8 @@ All commands assume you are in the repo root (`sim2real/`).
 
 ```bash
 # Copy routing dir, corrupt best_program.py by removing EVOLVE-BLOCK markers
-cp -r routing/ /tmp/routing_broken/
-sed -i '' 's/EVOLVE-BLOCK-START/BROKEN/' /tmp/routing_broken/best_program.py
+cp -r blis_router/best/ /tmp/routing_broken/
+sed -i '' 's/EVOLVE-BLOCK-START/BROKEN/' /tmp/routing_broken/best_program.go
 .venv/bin/python tools/transfer_cli.py extract /tmp/routing_broken/
 ```
 
@@ -75,9 +75,9 @@ cd llm-d-inference-scheduler && git log --oneline -1 && cd ..
 
 ```bash
 # Run extract twice, compare hashes from the file artifact (not stdout)
-.venv/bin/python tools/transfer_cli.py extract routing/
+.venv/bin/python tools/transfer_cli.py extract blis_router/best/
 jq .evolve_block_content_hash workspace/algorithm_summary.json > /tmp/hash1.txt
-.venv/bin/python tools/transfer_cli.py extract routing/
+.venv/bin/python tools/transfer_cli.py extract blis_router/best/
 jq .evolve_block_content_hash workspace/algorithm_summary.json > /tmp/hash2.txt
 diff /tmp/hash1.txt /tmp/hash2.txt
 ```
@@ -157,7 +157,7 @@ ls prompts/
 ### 3.2 Prompt templates reference correct artifacts
 
 For each prompt file, check:
-- `extract.md` references `routing/best_program.py` and produces `workspace/algorithm_summary.json`
+- `extract.md` references `blis_router/best/best_program.go` and produces `workspace/algorithm_summary.json`
 - `translate.md` reads `algorithm_summary.json` + mapping artifact, produces `signal_coverage.json`
 - `generate.md` reads `signal_coverage.json` + scorer template, produces files in target submodule
 
@@ -232,7 +232,7 @@ echo "Exit code: $?"
 This is the key integration test. Run Claude Code interactively:
 
 ```
-> Read prompts/transfer.md and execute Stages 1–3 using routing/ as input
+> Read prompts/transfer.md and execute Stages 1–3 using blis_router/best/ as input
 ```
 
 **Verify at each stage:**
@@ -571,7 +571,7 @@ Run after **every** PR merge:
 .venv/bin/python -m pytest tools/ -v
 
 # Extract still works
-.venv/bin/python tools/transfer_cli.py extract routing/
+.venv/bin/python tools/transfer_cli.py extract blis_router/best/
 
 # Mapping still valid
 .venv/bin/python tools/transfer_cli.py validate-mapping

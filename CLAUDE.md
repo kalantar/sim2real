@@ -7,7 +7,7 @@ inference-sim to production llm-d-inference-scheduler scorer plugins.
 
 ## Repository Structure
 
-- `routing/` — Input artifacts from evolutionary optimization (EVOLVE-BLOCK, metrics, workloads)
+- `blis_router/` — Input artifacts from evolutionary optimization (EVOLVE-BLOCK, metrics, workloads)
 - `docs/transfer/` — Mapping artifacts, scorer template, calibration log
 - `docs/plans/` — Design docs and implementation plans
 - `tools/` — Python CLI (`transfer_cli.py`) and Go test harness (PR3)
@@ -35,10 +35,10 @@ inference-sim to production llm-d-inference-scheduler scorer plugins.
 
 ```bash
 # Extract algorithm metadata
-python tools/transfer_cli.py extract routing/
+python tools/transfer_cli.py extract blis_router/best/
 
 # Extract with strict fidelity checks (recommended for CI)
-python tools/transfer_cli.py extract --strict routing/
+python tools/transfer_cli.py extract --strict blis_router/best/
 
 # Validate mapping artifact completeness
 # NOTE: commit hash check only verifies presence, not currency vs submodule HEAD;
