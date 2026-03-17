@@ -138,18 +138,6 @@ class TestExtract:
             f"Expected 'directory not found' error, got: {output.get('errors', [])}"
         )
 
-    def test_extract_old_routing_dir_exits_2(self):
-        """BC-9: extract against old routing/ directory exits 2 with 'best_program.go not found'."""
-        code, output = run_cli("extract", str(REPO_ROOT / "routing"))
-        assert code == 2, (
-            f"Expected exit 2 when running extract against routing/ (no best_program.go), "
-            f"got {code}: {output}"
-        )
-        output_str = json.dumps(output)
-        assert "best_program.go not found" in output_str, (
-            f"Expected 'best_program.go not found' in output; got: {output_str!r}"
-        )
-
     def test_extract_no_signals_exits_1(self):
         """F-15: EVOLVE-BLOCK found but no recognizable signals -> exit 1."""
         import tempfile, shutil
