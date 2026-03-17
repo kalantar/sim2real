@@ -1278,3 +1278,122 @@ def test_noise_characterize_t_eff_computation(tmp_path):
     expected_t_eff = max(0.05, 2 * expected_cv)
     assert abs(output["t_eff"] - expected_t_eff) < 0.002, \
         f"Expected T_eff ≈ {expected_t_eff}, got {output['t_eff']}"
+
+
+def test_benchmark_mechanism_check_pass(tmp_path):
+    """BC-13: improvement >= T_eff for matched workload → PASS."""
+    results = {
+        "workloads": [
+            {"name": "chatbot", "classification": "matched",
+             "baseline_p99": 0.45, "transfer_p99": 0.38},  # improvement ≈ 15.6%
+            {"name": "batch",   "classification": "unmatched",
+             "baseline_p99": 0.30, "transfer_p99": 0.31},  # change ≈ -3.3%
+        ]
+    }
+    results_file = tmp_path / "results.json"
+    results_file.write_text(json.dumps(results))
+
+    env = {**os.environ, "_SIM2REAL_ALLOWED_ROOT": str(tmp_path)}
+    result = subprocess.run(
+        [sys.executable, "tools/transfer_cli.py", "benchmark",
+         "--results", str(results_file), "--t-eff", "0.10"],
+        capture_output=True, text=True, env=env
+    )
+    assert result.returncode == 0
+    output = json.loads(result.stdout)
+    assert output["mechanism_check_verdict"] == "PASS"
+    assert output["status"] == "ok"
+
+
+def test_benchmark_mechanism_check_inconclusive(tmp_path):
+    """Improvement > 0 but < T_eff for all matched workloads → INCONCLUSIVE (exit 0)."""
+    results = {
+        "workloads": [
+            {"name": "chatbot", "classification": "matched",
+             "baseline_p99": 0.45, "transfer_p99": 0.44},  # improvement ≈ 2.2% < T_eff=0.10
+        ]
+    }
+    results_file = tmp_path / "results.json"
+    results_file.write_text(json.dumps(results))
+
+    env = {**os.environ, "_SIM2REAL_ALLOWED_ROOT": str(tmp_path)}
+    result = subprocess.run(
+        [sys.executable, "tools/transfer_cli.py", "benchmark",
+         "--results", str(results_file), "--t-eff", "0.10"],
+        capture_output=True, text=True, env=env
+    )
+    assert result.returncode == 0, f"INCONCLUSIVE should exit 0, got {result.returncode}"
+    output = json.loads(result.stdout)
+    assert output["mechanism_check_verdict"] == "INCONCLUSIVE"
+    assert output["status"] == "inconclusive", \
+        f"INCONCLUSIVE should have status='inconclusive', got '{output['status']}'"
+
+
+def test_benchmark_mechanism_check_fail(tmp_path):
+    """All matched workload improvements <= 0 → FAIL (exit 1)."""
+    results = {
+        "workloads": [
+            {"name": "chatbot", "classification": "matched",
+             "baseline_p99": 0.45, "transfer_p99": 0.50},  # regression
+        ]
+    }
+    results_file = tmp_path / "results.json"
+    results_file.write_text(json.dumps(results))
+
+    env = {**os.environ, "_SIM2REAL_ALLOWED_ROOT": str(tmp_path)}
+    result = subprocess.run(
+        [sys.executable, "tools/transfer_cli.py", "benchmark",
+         "--results", str(results_file), "--t-eff", "0.10"],
+        capture_output=True, text=True, env=env
+    )
+    assert result.returncode == 1, f"FAIL should exit 1, got {result.returncode}"
+    output = json.loads(result.stdout)
+    assert output["mechanism_check_verdict"] == "FAIL"
+
+
+def test_benchmark_requires_t_eff(tmp_path):
+    """BC-17: missing --t-eff → exit 1."""
+    results_file = tmp_path / "results.json"
+    results_file.write_text('{"workloads": []}')
+
+    env = {**os.environ, "_SIM2REAL_ALLOWED_ROOT": str(tmp_path)}
+    result = subprocess.run(
+        [sys.executable, "tools/transfer_cli.py", "benchmark",
+         "--results", str(results_file)],  # no --t-eff
+        capture_output=True, text=True, env=env
+    )
+    assert result.returncode == 1
+    output = json.loads(result.stdout)
+    assert "t-eff" in output["errors"][0].lower()
+
+
+def test_benchmark_malformed_input(tmp_path):
+    """BC-18: malformed JSON input causes exit code 2 (infrastructure error)."""
+    results_file = tmp_path / "bad_results.json"
+    results_file.write_text("{invalid json")
+
+    env = {**os.environ, "_SIM2REAL_ALLOWED_ROOT": str(tmp_path)}
+    result = subprocess.run(
+        [sys.executable, "tools/transfer_cli.py", "benchmark",
+         "--results", str(results_file), "--t-eff", "0.10"],
+        capture_output=True, text=True, env=env
+    )
+    assert result.returncode == 2, f"Expected exit 2, got {result.returncode}"
+    output = json.loads(result.stdout)
+    assert output["status"] == "error"
+
+
+def test_benchmark_missing_workloads_key(tmp_path):
+    """BC-18: valid JSON missing 'workloads' key causes exit code 2."""
+    results_file = tmp_path / "no_workloads.json"
+    results_file.write_text('{"other_key": 123}')
+
+    env = {**os.environ, "_SIM2REAL_ALLOWED_ROOT": str(tmp_path)}
+    result = subprocess.run(
+        [sys.executable, "tools/transfer_cli.py", "benchmark",
+         "--results", str(results_file), "--t-eff", "0.10"],
+        capture_output=True, text=True, env=env
+    )
+    assert result.returncode == 2, f"Expected exit 2, got {result.returncode}"
+    output = json.loads(result.stdout)
+    assert output["status"] == "error"

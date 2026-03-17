@@ -1001,6 +1001,142 @@ def _cmd_noise_characterize(args: argparse.Namespace) -> int:
     return _output("ok", 0, per_metric_cv=per_metric_cv, t_eff=t_eff, halt=False)
 
 
+# ─── benchmark ────────────────────────────────────────────────────────────────
+
+def _cmd_benchmark(args: argparse.Namespace) -> int:
+    """Compute mechanism check from benchmark results.
+
+    Input JSON format:
+        {"workloads": [
+            {"name": str, "classification": "matched"|"unmatched",
+             "baseline_p99": float, "transfer_p99": float},
+            ...
+        ]}
+
+    Exit codes:
+        0 = success (PASS or INCONCLUSIVE — operator must check mechanism_check_verdict)
+        1 = validation failure (FAIL verdict or missing --t-eff)
+        2 = infrastructure error (file missing or invalid JSON)
+    """
+    if args.t_eff is None:
+        return _output("error", 1,
+                       errors=["--t-eff required: run noise-characterize first"],
+                       mechanism_check_verdict="FAIL", results=[])
+
+    t_eff = args.t_eff
+    if t_eff <= 0:
+        return _output("error", 1,
+                       errors=[f"--t-eff must be > 0, got {t_eff}. "
+                               "noise-characterize guarantees T_eff >= 0.05; "
+                               "a non-positive value indicates manual override error."],
+                       mechanism_check_verdict="FAIL", results=[])
+
+    results_path = Path(args.results).resolve()
+    allowed_root = Path(os.environ["_SIM2REAL_ALLOWED_ROOT"]).resolve() if "_SIM2REAL_ALLOWED_ROOT" in os.environ else REPO_ROOT
+    if not results_path.is_relative_to(allowed_root):
+        return _output("error", 2,
+                       errors=[f"Results path '{results_path}' is outside allowed root '{allowed_root}'."],
+                       mechanism_check_verdict="FAIL", results=[])
+    if not results_path.exists():
+        return _output("error", 2,
+                       errors=[f"results file not found: {args.results}"],
+                       mechanism_check_verdict="FAIL", results=[])
+
+    if results_path.stat().st_size > MAX_FILE_SIZE:
+        return _output("error", 2,
+                       errors=[f"results file exceeds {MAX_FILE_SIZE} bytes: {args.results}"],
+                       mechanism_check_verdict="FAIL", results=[])
+
+    try:
+        data = json.loads(results_path.read_text())
+    except json.JSONDecodeError as e:
+        return _output("error", 2,
+                       errors=[f"invalid JSON in {args.results}: {e}"],
+                       mechanism_check_verdict="FAIL", results=[])
+
+    if not isinstance(data, dict) or "workloads" not in data:
+        return _output("error", 2,
+                       errors=["missing 'workloads' key in input JSON"],
+                       mechanism_check_verdict="FAIL", results=[])
+
+    workloads = data["workloads"]
+    if not isinstance(workloads, list):
+        return _output("error", 2,
+                       errors=["'workloads' must be a list"],
+                       mechanism_check_verdict="FAIL", results=[])
+
+    results = []
+    matched_improvements = []
+    specificity_failures = []
+    errors = []
+
+    for w in workloads:
+        if not isinstance(w, dict):
+            continue
+        name = w.get("name", "unknown")
+        classification = w.get("classification", "unmatched")
+        baseline_p99 = w.get("baseline_p99", None)
+        transfer_p99 = w.get("transfer_p99", None)
+
+        if baseline_p99 is None or transfer_p99 is None:
+            missing = [k for k in ["baseline_p99", "transfer_p99"]
+                       if k not in w or w[k] is None]
+            results.append({"workload": name, "classification": classification,
+                             "improvement": 0.0, "error": f"missing required field(s): {', '.join(missing)}"})
+            continue
+
+        if baseline_p99 <= 0:
+            results.append({"workload": name, "classification": classification,
+                             "improvement": 0.0, "error": "baseline_p99 must be > 0"})
+            continue
+
+        if transfer_p99 < 0:
+            results.append({"workload": name, "classification": classification,
+                             "improvement": 0.0, "error": "transfer_p99 must be >= 0"})
+            continue
+
+        improvement = (baseline_p99 - transfer_p99) / baseline_p99
+        results.append({"workload": name, "classification": classification,
+                         "improvement": round(improvement, 6)})
+
+        if classification == "matched":
+            matched_improvements.append(improvement)
+        elif classification == "unmatched":
+            if abs(baseline_p99 - transfer_p99) / baseline_p99 >= t_eff:
+                specificity_failures.append({
+                    "workload": name,
+                    "change_ratio": round(abs(baseline_p99 - transfer_p99) / baseline_p99, 6)
+                })
+        else:
+            errors.append(f"unrecognized classification value: {classification!r} for workload {name!r}")
+
+    if not matched_improvements:
+        return _output("error", 1,
+                       errors=["no matched workloads found — cannot compute mechanism check"],
+                       mechanism_check_verdict="FAIL", results=results,
+                       t_eff=t_eff, specificity_failures=specificity_failures)
+
+    # Mechanism check
+    if any(imp >= t_eff for imp in matched_improvements):
+        verdict = "PASS"
+    elif any(imp > 0 for imp in matched_improvements):
+        verdict = "INCONCLUSIVE"
+    else:
+        verdict = "FAIL"
+
+    exit_code = 1 if verdict == "FAIL" else 0
+    status = "error" if verdict == "FAIL" else ("inconclusive" if verdict == "INCONCLUSIVE" else "ok")
+    if verdict == "FAIL":
+        errors.append("mechanism check FAIL: no matched workload improvement >= T_eff")
+    if specificity_failures:
+        errors.append(f"specificity check failed for {len(specificity_failures)} unmatched workload(s)")
+
+    passed = verdict == "PASS"
+    return _output(status, exit_code, mechanism_check_verdict=verdict, passed=passed,
+                   results=results, t_eff=t_eff, specificity_failures=specificity_failures,
+                   errors=errors)
+
+
 def main():
     if sys.version_info < (3, 10):
         print("ERROR: transfer_cli.py requires Python >= 3.10 "
@@ -1045,6 +1181,15 @@ def main():
     p_noise.add_argument("--runs", required=True,
         help="Path to JSON file with baseline latency runs: {runs: [{p50, p95, p99}]}")
     p_noise.set_defaults(func=_cmd_noise_characterize)
+
+    # benchmark subcommand
+    p_bench = subparsers.add_parser("benchmark",
+        help="Compute mechanism check from benchmark results")
+    p_bench.add_argument("--results", required=True,
+        help="Path to JSON file with workload results")
+    p_bench.add_argument("--t-eff", type=float, default=None,
+        help="Effective threshold from noise-characterize")
+    p_bench.set_defaults(func=_cmd_benchmark)
 
     args = parser.parse_args()
     exit_code = args.func(args)
