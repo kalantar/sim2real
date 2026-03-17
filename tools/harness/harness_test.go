@@ -328,6 +328,47 @@ func findRepoRoot(t *testing.T) string {
 	}
 }
 
+func TestLoadAlgorithmReturnsEvolved(t *testing.T) {
+	repoRoot := findRepoRoot(t)
+	summaryPath := filepath.Join(repoRoot, "workspace", "algorithm_summary.json")
+	if _, err := os.Stat(summaryPath); err != nil {
+		t.Skip("requires workspace/algorithm_summary.json (run extract first)")
+	}
+
+	alg, err := LoadAlgorithm(summaryPath, repoRoot)
+	if err != nil {
+		t.Fatalf("LoadAlgorithm: %v", err)
+	}
+
+	// High-load vs low-load: evolved algorithm should prefer lower load
+	highLoad := sim.RouterState{
+		Snapshots: []sim.RoutingSnapshot{
+			{ID: "heavy", QueueDepth: 6, InFlightRequests: 2}, // load=8 → hard penalty
+			{ID: "light", QueueDepth: 0, InFlightRequests: 1}, // load=1
+		},
+	}
+	decision := alg.Route(&sim.Request{ID: "r1"}, &highLoad)
+	if decision.TargetInstance != "light" {
+		t.Errorf("expected 'light' (lower load), got %q", decision.TargetInstance)
+	}
+
+	// BC-3: KV pressure penalty fires when KVUtilization > 0.82
+	kvState := sim.RouterState{
+		Snapshots: []sim.RoutingSnapshot{
+			{ID: "high-kv", QueueDepth: 0, KVUtilization: 0.90},
+			{ID: "low-kv",  QueueDepth: 0, KVUtilization: 0.50},
+		},
+	}
+	kvDecision := alg.Route(&sim.Request{ID: "r2"}, &kvState)
+	if kvDecision.TargetInstance != "low-kv" {
+		t.Errorf("expected 'low-kv' (lower KV), got %q", kvDecision.TargetInstance)
+	}
+	if kvDecision.Scores["high-kv"] >= kvDecision.Scores["low-kv"] {
+		t.Errorf("expected high-kv score < low-kv score; got high=%f low=%f",
+			kvDecision.Scores["high-kv"], kvDecision.Scores["low-kv"])
+	}
+}
+
 func mustAtoi(t *testing.T, s string) int {
 	t.Helper()
 	result, err := strconv.Atoi(s)

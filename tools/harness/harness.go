@@ -127,7 +127,7 @@ func LoadAlgorithm(summaryPath, repoRoot string) (Algorithm, error) {
 			summary.EvolveBlockContentHash, computedHash)
 	}
 
-	return &trivialAlgorithm{}, nil
+	return newEvolvedAlgorithm(), nil
 }
 
 // trivialAlgorithm is a placeholder that scores by 1/(1+EffectiveLoad).
