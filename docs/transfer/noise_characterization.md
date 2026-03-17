@@ -10,8 +10,9 @@ that will be used for the transfer benchmark.
 
 1. Ensure the cluster is in steady state (no unusual traffic, stable resource usage).
 
-2. Run 5 baseline requests using the default scheduler (without evolved scorer):
-   Record P50, P95, P99 latency for each benchmark workload.
+2. Run exactly 5 baseline requests using a single representative workload configuration
+   with the default scheduler (without evolved scorer). Record P50, P95, P99 latency per
+   request (one entry per request, not per workload).
 
 3. Save results to `workspace/baseline_runs.json`:
    ```json
