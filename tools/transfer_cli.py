@@ -273,12 +273,11 @@ def _check_fidelity(signals: list[dict], *, strict: bool = False) -> tuple[bool,
         return True, []
 
     MAX_MAPPING_SIZE = 10 * 1024 * 1024  # 10 MB
-    if MAPPING_PATH.stat().st_size > MAX_MAPPING_SIZE:
-        # Return a distinguishable error so callers can map to the correct exit code.
-        # Oversized file is an infrastructure issue (exit 2), not a fidelity failure.
-        return False, [
-            f"INFRA: Mapping artifact exceeds {MAX_MAPPING_SIZE} bytes — refusing to read."
-        ]
+    try:
+        if MAPPING_PATH.stat().st_size > MAX_MAPPING_SIZE:
+            return False, [f"INFRA: Mapping artifact exceeds {MAX_MAPPING_SIZE} bytes — refusing to read."]
+    except OSError as e:
+        return False, [f"INFRA: Failed to stat mapping artifact: {e}"]
 
     if not strict:
         print("NOTICE: Running without --strict. Fidelity checks are active (mapping artifact "
@@ -355,7 +354,7 @@ def cmd_extract(args: argparse.Namespace) -> int:
     # CI auto-detection — FAIL if --strict not used in CI environment
     ci_val = os.environ.get("CI", "").lower()
     if ci_val in ("true", "1", "yes") and not getattr(args, 'strict', False):
-        return _output("error", 1, errors=[
+        return _output("error", 2, errors=[
             "CI environment detected (CI env var is set) but --strict flag not set. "
             "CI pipelines MUST use --strict to ensure deterministic fidelity checks. "
             "Fix: either pass --strict (recommended), set CI=false, or unset the CI "

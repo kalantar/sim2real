@@ -44,6 +44,10 @@ class TestExtract:
         summary = json.loads(summary_path.read_text())
         assert "algorithm_name" in summary
         assert "evolve_block_source" in summary
+        assert "blis_router/best/best_program.go" in summary["evolve_block_source"], (
+            f"evolve_block_source should reference blis_router/best/best_program.go, "
+            f"got: {summary['evolve_block_source']!r}"
+        )
         assert "evolve_block_content_hash" in summary
         assert len(summary["evolve_block_content_hash"]) == 64
         assert "signals" in summary
@@ -132,6 +136,18 @@ class TestExtract:
         assert any("not found" in e.lower() or "routing directory" in e.lower()
                     for e in output.get("errors", [])), (
             f"Expected 'directory not found' error, got: {output.get('errors', [])}"
+        )
+
+    def test_extract_old_routing_dir_exits_2(self):
+        """BC-9: extract against old routing/ directory exits 2 with 'best_program.go not found'."""
+        code, output = run_cli("extract", str(REPO_ROOT / "routing"))
+        assert code == 2, (
+            f"Expected exit 2 when running extract against routing/ (no best_program.go), "
+            f"got {code}: {output}"
+        )
+        output_str = json.dumps(output)
+        assert "best_program.go not found" in output_str, (
+            f"Expected 'best_program.go not found' in output; got: {output_str!r}"
         )
 
     def test_extract_no_signals_exits_1(self):
@@ -1035,14 +1051,14 @@ class TestCIStrictEnforcement:
             summary.unlink()
 
     def test_ci_env_requires_strict_flag(self):
-        """F-1: In CI, extract without --strict FAILS with exit 1."""
+        """F-1: In CI, extract without --strict FAILS with exit 2 (invocation error)."""
         import os
         result = subprocess.run(
             [sys.executable, str(CLI), "extract", str(ROUTING_DIR)],
             capture_output=True, text=True, cwd=str(REPO_ROOT),
             env={**os.environ, "CI": "true"},
         )
-        assert result.returncode == 1
+        assert result.returncode == 2
         stdout = json.loads(result.stdout)
         assert stdout["status"] == "error"
         assert any("strict" in e.lower() for e in stdout.get("errors", []))
