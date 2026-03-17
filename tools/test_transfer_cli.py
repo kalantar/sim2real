@@ -303,9 +303,10 @@ class TestExtract:
         # Provide best_program_info.json but NOT best_program.go
         info = tmp_path / "best_program_info.json"
         info.write_text('{"language": "go", "metrics": {}}')
+        env = {k: v for k, v in os.environ.items() if k != "CI"}
         result = subprocess.run(
             [sys.executable, str(REPO_ROOT / "tools" / "transfer_cli.py"), "extract", str(tmp_path)],
-            capture_output=True, text=True,
+            capture_output=True, text=True, env=env,
         )
         assert result.returncode == 2, f"expected exit 2, got {result.returncode}"
         assert "best_program.go not found" in result.stdout or "best_program.go not found" in result.stderr, \
