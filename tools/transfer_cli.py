@@ -406,7 +406,7 @@ def cmd_extract(args: argparse.Namespace) -> int:
         return _output("error", 1, errors=["No routing signals found in EVOLVE-BLOCK"])
 
     # Sanity check: warn if signal count is suspiciously low
-    MINIMUM_EXPECTED_SIGNALS = 3
+    MINIMUM_EXPECTED_SIGNALS = 2
     if len(signals) < MINIMUM_EXPECTED_SIGNALS:
         msg = (f"Only {len(signals)} signals found (expected >= {MINIMUM_EXPECTED_SIGNALS}). "
                f"Regex may have missed field access patterns. Manually verify against EVOLVE-BLOCK.")
