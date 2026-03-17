@@ -75,7 +75,14 @@ func LoadAlgorithm(summaryPath, repoRoot string) (Algorithm, error) {
 	if len(parts) != 2 {
 		return nil, fmt.Errorf("invalid evolve_block_source format: %q", summary.EvolveBlockSource)
 	}
-	sourcePath := filepath.Join(repoRoot, parts[0])
+	var sourcePath string
+	if filepath.IsAbs(parts[0]) {
+		// Defensive: schema pattern rejects absolute paths, so schema-validated artifacts
+		// never reach this branch. Retained for callers that bypass schema validation.
+		sourcePath = parts[0]
+	} else {
+		sourcePath = filepath.Join(repoRoot, parts[0])
+	}
 	// Guard against path traversal
 	absSource, err := filepath.Abs(sourcePath)
 	if err != nil {

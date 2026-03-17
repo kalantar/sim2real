@@ -35,7 +35,7 @@
       "success_rate": "100%"
     }
   },
-  "language": "python",
+  "language": "go",
   "saved_at": 1773340800.570737,
   "baseline_metrics": {
     "seeds": [

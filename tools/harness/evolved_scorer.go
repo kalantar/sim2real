@@ -63,6 +63,13 @@ func (s *EvolvedScorer) Category() scheduling.ScorerCategory {
 // Score translates production endpoint metrics to sim types, runs the evolved algorithm,
 // and returns per-endpoint scores from the evolved algorithm; values are not clamped to [0, 1] and may be negative when KV utilization is high (KV penalty is subtractive).
 //
+// WARNING — scheduler clamping under full-cluster KV saturation:
+// The production scheduler framework (enforceScoreRange in scheduler_profile.go) clamps
+// all scores to [0, 1] before accumulation. When all endpoints simultaneously exceed 0.9
+// KV utilization, the subtractive penalty can drive all scores below 0.0 — after clamping,
+// every endpoint receives score 0.0, losing all differentiation. Operators should monitor
+// for this condition under sustained cluster-wide KV pressure.
+//
 // Endpoints with nil metrics receive score 0.0 (defensive nil guard, matches BLISWeightedScorer).
 // Empty endpoint list returns an empty (non-nil) map.
 func (s *EvolvedScorer) Score(_ context.Context, _ *scheduling.CycleState, req *scheduling.LLMRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {

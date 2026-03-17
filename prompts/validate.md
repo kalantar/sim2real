@@ -21,8 +21,8 @@ equivalence between the generated scorer plugin and the original simulation algo
 Before proceeding, verify all predecessor artifacts exist and are valid:
 
 ```bash
-python tools/transfer_cli.py validate-schema workspace/signal_coverage.json
-python tools/transfer_cli.py validate-schema workspace/stage3_output.json
+.venv/bin/python tools/transfer_cli.py validate-schema workspace/signal_coverage.json
+.venv/bin/python tools/transfer_cli.py validate-schema workspace/stage3_output.json
 ```
 
 **HALT if either command exits non-zero.** Message: "HALT: Stage [2|3] prerequisite missing or invalid: workspace/<file>"
@@ -40,8 +40,8 @@ Verify Stage 4 completed successfully (scorer builds and tests pass):
 Verify Stage 1 extract artifact exists (required by Suite A `t.Skip` guard):
 
 ```bash
-test -f workspace/algorithm_summary.json || echo "HALT: workspace/algorithm_summary.json missing (run extract first)"
-python tools/transfer_cli.py validate-schema workspace/algorithm_summary.json
+test -f workspace/algorithm_summary.json || { echo "HALT: workspace/algorithm_summary.json missing (run extract first)"; exit 1; }
+.venv/bin/python tools/transfer_cli.py validate-schema workspace/algorithm_summary.json || { echo "HALT: workspace/algorithm_summary.json schema validation failed"; exit 1; }
 ```
 
 **HALT if `workspace/algorithm_summary.json` is absent or invalid.** Without it, Suite A silently skips (exits 0/PASS) without running any equivalence checks — this would bypass the go/no-go gate.
@@ -63,7 +63,7 @@ The `runs` array must contain exactly 5 entries (one per baseline request). The 
 Then compute CV and T_eff:
 
 ```bash
-python tools/transfer_cli.py noise-characterize --runs workspace/baseline_runs.json
+.venv/bin/python tools/transfer_cli.py noise-characterize --runs workspace/baseline_runs.json
 ```
 
 **HALT if exit code 1 (CV > 15%).** Message: "HALT: Noise too high — re-run during lower-variance window."
@@ -136,6 +136,8 @@ Record: deterministic (true if TestSuiteC_ConcurrentDeterminism passes), max_pil
 
 **[OPERATOR ACTION REQUIRED]** This step requires live cluster access that Claude Code cannot perform.
 
+> **Hardware reference:** Use `blis_router/CLUSTER.md` for the exact hardware and cluster configuration required to reproduce the simulation environment.
+
 **Prerequisite check:** Verify workload YAML files exist before classification:
 
 ```bash
@@ -152,14 +154,15 @@ For each benchmark workload, classify as **matched** or **unmatched** using this
 >
 > **YAML field → signal_coverage.json `sim_name` mapping:**
 >
-> | Workload YAML field pattern | signal_coverage `sim_name` |
-> |----------------------------|---------------------------|
-> | `queue_depth_range`, `queue_depth_min/max` | `QueueDepth` |
-> | `kv_util_range`, `kv_util_min/max`, `kv_utilization` | `KVUtilization` |
-> | `in_flight_range`, `in_flight_requests` | `InFlightRequests` |
-> | `cache_hit_rate`, `cache_hit_range` | `CacheHitRate` |
+> The blis_router workload YAMLs use a `clients[]` structure. Use the following characteristics to infer which sim signals a workload exercises:
 >
-> If a workload YAML contains parameter ranges for fields not in this table, check `workspace/signal_coverage.json` `signals[].sim_name` for exact matches. The table above covers v1 EVOLVE-BLOCK signals; future algorithms may introduce additional signal names.
+> | Workload YAML characteristic | signal_coverage `sim_name` |
+> |------------------------------|---------------------------|
+> | `aggregate_rate` and/or `clients[*].arrival.process` + `cv` (request arrival rate and burstiness drive concurrency) | `InFlightRequests` |
+> | `clients[*].prefix_group` present and/or `clients[*].prefix_length` set (prefix sharing drives KV block reuse) | `KVUtilization` |
+> | `clients[*].input_distribution.params.mean` at large values (long prompts occupy KV blocks) | `KVUtilization` |
+>
+> A workload that has no `prefix_group` entries and has short token distributions may still exercise `InFlightRequests` via `aggregate_rate`. If a workload YAML introduces field names not covered by this table, check `workspace/signal_coverage.json` `signals[].sim_name` for exact or partial matches. The table above reflects the blis_router workload schema (version "1" `clients[]` format); earlier v0 workloads used flat `queue_depth_range`/`kv_util_range` fields that are no longer present.
 
 Use the `llm-d-benchmark` harness (submodule at `llm-d-benchmark/`) to run baseline and transfer benchmark configurations. Save results to `workspace/benchmark_results.json`:
 
@@ -173,7 +176,7 @@ Use the `llm-d-benchmark` harness (submodule at `llm-d-benchmark/`) to run basel
 Then compute mechanism check:
 
 ```bash
-python tools/transfer_cli.py benchmark --results workspace/benchmark_results.json --t-eff <T_EFF_FROM_STEP_1>
+.venv/bin/python tools/transfer_cli.py benchmark --results workspace/benchmark_results.json --t-eff <T_EFF_FROM_STEP_1>
 ```
 
 **HALT if exit code 2 (infrastructure error — file missing or invalid JSON).** Message: "HALT: benchmark infrastructure error." Do NOT attempt to parse JSON output on exit code 2; the output may be absent or malformed.
@@ -238,7 +241,7 @@ Compile results from Steps 1–5 into `workspace/validation_results.json`:
 Validate the written artifact:
 
 ```bash
-python tools/transfer_cli.py validate-schema workspace/validation_results.json
+.venv/bin/python tools/transfer_cli.py validate-schema workspace/validation_results.json
 ```
 
 **HALT if validate-schema exits non-zero.**

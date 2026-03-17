@@ -51,11 +51,11 @@ Use prefix matching (mapping artifact stores abbreviated 7-char hash).
 MAPPING_HASH=$(awk '/Pinned commit hash:/ { match($0, /[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/); if (RSTART>0) print substr($0, RSTART, 7) }' docs/transfer/blis_to_llmd_mapping.md)
 
 # Verify extraction succeeded
-[ -n "${MAPPING_HASH}" ] || echo "HALT: could not extract pinned commit hash from mapping artifact"
+[ -n "${MAPPING_HASH}" ] || { echo "HALT: could not extract pinned commit hash from mapping artifact"; exit 1; }
 
 # Get full submodule HEAD and compare prefix
 SUBMODULE_HEAD=$(git -C llm-d-inference-scheduler rev-parse HEAD)
-echo "${SUBMODULE_HEAD}" | grep -q "^${MAPPING_HASH}" || echo "HALT: stale submodule commit — mapping artifact pinned at ${MAPPING_HASH}, submodule at ${SUBMODULE_HEAD}"
+echo "${SUBMODULE_HEAD}" | grep -q "^${MAPPING_HASH}" || { echo "HALT: stale submodule commit — mapping artifact pinned at ${MAPPING_HASH}, submodule at ${SUBMODULE_HEAD}"; exit 1; }
 ```
 
 **Store `SUBMODULE_HEAD`** — it becomes the `commit_hash` field in the output artifact.
@@ -96,16 +96,18 @@ For each signal with `type: "unknown"`:
 
 ## Step 4: F-10 Double-Counting Detection (Cross-PR Contract #4)
 
-**Skip this step entirely if `composite_signals` in `workspace/algorithm_summary.json` is empty.** An empty `composite_signals: []` means the EVOLVE-BLOCK contains no composite method calls (e.g., no `EffectiveLoad()`), so there is no composite to check for double-counting. For the current blis_router EVOLVE-BLOCK, `composite_signals: []` — proceed directly to Step 5.
+**Skip this step entirely if `composite_signals` in `workspace/algorithm_summary.json` is empty.** An empty `composite_signals: []` means the EVOLVE-BLOCK contains no composite method calls (e.g., no `EffectiveLoad()`), so there is no composite to check for double-counting. Always read the artifact to determine this — do not assume based on prior runs.
 
 Check if two signals map to the same production metric:
 
-- If `InFlightRequests` falls back to `RunningQueueSize`, then EffectiveLoad becomes `WaitingQueueSize + 2*RunningQueueSize` — double-counting that metric.
+- If `InFlightRequests` falls back to `RunningRequestsSize`, then EffectiveLoad becomes `WaitingQueueSize + 2*RunningRequestsSize` — double-counting that metric.
 - **Detection:** Check if any two signals in the `EffectiveLoad` composite (`QueueDepth`, `BatchSize`, `InFlightRequests`) share the same `prod_access_path`.
 - **If double-counting detected:** Add a `notes` field warning about the risk and document the mitigation (use single count or different proxy).
 - **HALT** if double-counting would make the composite uncomputable. Write `workspace/escalation.json` with `halt_reason: "unmappable_signal"`.
 
 ## Step 5: CacheHitRate Investigation (Cross-PR Contract #5)
+
+**Skip this step entirely if `CacheHitRate` is not present in `workspace/algorithm_summary.json` `signals[]`.** The current blis_router EVOLVE-BLOCK does not use CacheHitRate; executing this step when the signal is absent would inject a spurious entry into `signal_coverage.json` and corrupt the `coverage_complete` determination. Always read the artifact to determine this — do not assume based on prior runs.
 
 The mapping artifact marks CacheHitRate's production access path as UNVERIFIED.
 Derive the concrete access path from PrecisePrefixCache:

@@ -214,6 +214,10 @@ func (ws *WeightedScoring) Route(req *Request, state *RouterState) RoutingDecisi
 		if delta := cachedLoad - minInflight; delta > 0 {
 			decay := 1.0 / (1.0 + 0.6*float64(delta))
 			aw[0] = ws.weights[0] * decay
+			// NOTE: aw[1] = 1.0 - aw[0] is only correct for exactly 2 scorers.
+			// With routing_policy.yaml (prefix-affinity + load-balance, 2 scorers)
+			// this is valid: aw[0]+aw[1] = 1.0. If deployed with a 3-scorer config,
+			// aw[2] remains at ws.weights[2] and scores will sum above 1.0.
 			aw[1] = 1.0 - aw[0]
 		}
 	}

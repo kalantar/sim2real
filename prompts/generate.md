@@ -18,14 +18,14 @@ Verify all required input artifacts exist and are valid. **HALT if any check fai
 
 ```bash
 # algorithm_summary.json: exists + schema valid + scope passed
-test -f workspace/algorithm_summary.json || echo "HALT: missing algorithm_summary.json"
-.venv/bin/python tools/transfer_cli.py validate-schema workspace/algorithm_summary.json
-.venv/bin/python -c "import json,sys; d=json.load(open('workspace/algorithm_summary.json')); sys.exit(0 if d.get('scope_validation_passed') is True else 1)"
+test -f workspace/algorithm_summary.json || { echo "HALT: missing algorithm_summary.json"; exit 1; }
+.venv/bin/python tools/transfer_cli.py validate-schema workspace/algorithm_summary.json || { echo "HALT: algorithm_summary.json schema validation failed"; exit 1; }
+.venv/bin/python -c "import json,sys; d=json.load(open('workspace/algorithm_summary.json')); sys.exit(0 if d.get('scope_validation_passed') is True else 1)" || { echo "HALT: algorithm_summary.json scope_validation_passed is not true"; exit 1; }
 
 # signal_coverage.json: exists + schema valid + coverage complete
-test -f workspace/signal_coverage.json || echo "HALT: missing signal_coverage.json"
-.venv/bin/python tools/transfer_cli.py validate-schema workspace/signal_coverage.json
-.venv/bin/python -c "import json,sys; d=json.load(open('workspace/signal_coverage.json')); sys.exit(0 if d.get('coverage_complete') is True and len(d.get('unmapped_signals',[])) == 0 else 1)"
+test -f workspace/signal_coverage.json || { echo "HALT: missing signal_coverage.json"; exit 1; }
+.venv/bin/python tools/transfer_cli.py validate-schema workspace/signal_coverage.json || { echo "HALT: signal_coverage.json schema validation failed"; exit 1; }
+.venv/bin/python -c "import json,sys; d=json.load(open('workspace/signal_coverage.json')); sys.exit(0 if d.get('coverage_complete') is True and len(d.get('unmapped_signals',[])) == 0 else 1)" || { echo "HALT: signal_coverage.json coverage_complete is not true or has unmapped signals"; exit 1; }
 
 # Submodule staleness check: signal_coverage.json commit_hash must match HEAD
 .venv/bin/python -c "
@@ -34,11 +34,11 @@ d = json.load(open('workspace/signal_coverage.json'))
 head = subprocess.check_output(['git', '-C', 'llm-d-inference-scheduler', 'rev-parse', 'HEAD']).decode().strip()
 match = head.startswith(d['commit_hash']) or d['commit_hash'].startswith(head)
 sys.exit(0 if match else 1)
-"
+" || { echo "HALT: signal_coverage.json commit_hash does not match llm-d-inference-scheduler HEAD"; exit 1; }
 
 # Scorer template and mapping artifact
-test -f docs/transfer/scorer_template.go.md || echo "HALT: missing scorer template"
-test -f docs/transfer/blis_to_llmd_mapping.md || echo "HALT: missing mapping artifact"
+test -f docs/transfer/scorer_template.go.md || { echo "HALT: missing scorer template"; exit 1; }
+test -f docs/transfer/blis_to_llmd_mapping.md || { echo "HALT: missing mapping artifact"; exit 1; }
 ```
 
 On HALT, write `workspace/escalation.json` with the appropriate `halt_reason`:
@@ -140,17 +140,22 @@ Add the scorer factory registration to `llm-d-inference-scheduler/pkg/plugins/re
 
 ## Step 4: CacheHitRate Handling
 
+**Skip this step entirely if `CacheHitRate` is not present in `workspace/signal_coverage.json` `signals[]` at all.** The current blis_router algorithm does not use CacheHitRate; generating dead `cacheHitRate` code when the signal is absent would add unreachable code and could mask missing-signal detection bugs. Always read the artifact to determine this — do not assume based on prior runs.
+
 Check `workspace/signal_coverage.json` for the CacheHitRate signal:
 
+- **If absent (not in `signals[]` at all):** skip this step entirely — do not emit any CacheHitRate code.
 - **If mapped** (has a `prod_access_path`): use that path in generated code.
 - **If unmapped or `prod_access_path: "UNVERIFIED"`**: emit `// CacheHitRate: production access path unavailable — using zero fallback` and assign `cacheHitRate = 0.0`.
 - **HALT if CacheHitRate is used as a multiplier** in the EVOLVE-BLOCK scoring logic (a zero fallback would zero out the entire score). Use `halt_reason: "cache_hit_rate_unavailable_stage3"`.
 
 ## Step 5: F-10 Double-Counting Guard
 
+**Skip this step entirely if `composite_signals` in `workspace/algorithm_summary.json` is empty.** An empty `composite_signals: []` means the EVOLVE-BLOCK contains no composite method calls (e.g., no `EffectiveLoad()`), so there is no composite to check for double-counting. Always read the artifact to determine this — do not assume based on prior runs.
+
 Check if any two signals in the EffectiveLoad composite share the same `prod_access_path`:
 
-- **If double-counting detected**: use `RunningQueueSize` once with adjusted coefficient (option a) or use `RunningRequestCount` as an alternative proxy (option b).
+- **If double-counting detected**: use `RunningRequestsSize` once with an adjusted coefficient (both composite inputs map to this single production field — keep the combined weight but emit the field access only once).
 - **If neither alternative available**: emit a `// WARNING: F-10 double-counting risk` comment and use the single-count approach.
 - **HALT only if** double-counting would affect >50% of the scoring weight.
 

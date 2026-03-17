@@ -1,7 +1,7 @@
 package harness
 
 import (
-	"fmt"
+	"log"
 
 	sim "github.com/inference-sim/inference-sim/sim"
 )
@@ -38,6 +38,18 @@ type evolvedAlgorithm struct {
 // newEvolvedAlgorithm creates an evolvedAlgorithm with inference-sim's default scorer
 // configuration (prefix-affinity:3, queue-depth:2, kv-utilization:2, blockSize=64).
 // blockSize=64 matches the default used in inference-sim cluster simulations.
+//
+// NOTE — scorer-config divergence from evolution environment:
+// The EVOLVE-BLOCK in blis_router/best/best_program.go was evolved using
+// routing_policy.yaml (prefix-affinity:load-balance = 1:1, i.e. 0.5:0.5 normalized),
+// but this harness uses DefaultScorerConfigs() (prefix-affinity:queue-depth:kv-utilization
+// = 3:2:2). Suite A's Kendall-tau ≥ 0.8 threshold was calibrated with DefaultScorerConfigs
+// as the base, not the production load-balance config. In practice this does not affect
+// Suite A pass rates because technique 1 (adaptive decay) never fires when InputTokens
+// is nil (all prefix-affinity scores are 0.0), so the KV penalty and tiebreaker dominate
+// and those are base-scorer-independent. Future maintainers recalibrating thresholds or
+// constructing requests with non-nil InputTokens should rebuild the base using the 2-scorer
+// production config: sim.NewRoutingPolicy("weighted", []sim.ScorerConfig{{Name:"prefix-affinity",Weight:1},{Name:"load-balance",Weight:1}}, 64, nil).
 func newEvolvedAlgorithm() *evolvedAlgorithm {
 	return &evolvedAlgorithm{
 		base: sim.NewRoutingPolicy("weighted", sim.DefaultScorerConfigs(), 64, nil),
@@ -73,7 +85,8 @@ func (a *evolvedAlgorithm) Route(req *sim.Request, state *sim.RouterState) sim.R
 	baseDecision := a.base.Route(req, state)
 
 	if len(baseDecision.Scores) == 0 {
-		panic(fmt.Sprintf("evolvedAlgorithm.Route: base.Route returned empty Scores map for %d snapshots", len(snapshots)))
+		log.Printf("evolvedAlgorithm.Route: base.Route returned empty Scores map for %d snapshots; returning base decision", len(snapshots))
+		return baseDecision
 	}
 
 	// Step 2: Apply EVOLVE-BLOCK techniques 2 and 3 to produce final scores.

@@ -8,6 +8,7 @@ The evolved router achieves **+11.5% improvement** over the best hand-tuned base
 ```
 sim2real/blis_router/
 ├── README.md                 # This file
+├── CLUSTER.md                # Hardware and cluster reproduction spec (Stage 5 cluster benchmarks)
 ├── llm_config.yaml           # LLM + hardware + cluster config
 ├── workloads/                # Traffic profiles used in simulation
 │   ├── workload_glia_40qps.yaml        # General traffic (40 QPS, bursty, ShareGPT-like)
@@ -57,9 +58,9 @@ sim2real/blis_router/
 
 | Algorithm | glia_40qps E2E (ms) | prefix_heavy E2E (ms) | Combined vs 1:1 |
 |-----------|---------------------|----------------------|-----------------|
-| LLQ | 6357 | 1300 | -61.0% |
-| LOR | 4305 | 861 | -11.6% |
-| Glia | 4457 | 880 | -14.3% |
+| LLQ | 6357 | 1300 | -55.1% |
+| LOR | 4305 | 861 | -6.6% |
+| Glia | 4457 | 880 | -8.8% |
 | **1:1** | **4314** | **790** | **0% (control)** |
 | 3:2:2 | 4311 | 818 | -0.7% |
 | **Evolved** | **4303** | **700** | **+11.5%** |
@@ -197,8 +198,8 @@ All signals used by the evolved router are production-available. No simulator-on
 
 ## Running the reproduction script
 
-A standalone simulation repro script is provided at `repro/blis_router_repro.py`.
-It runs all baselines (LLQ, LOR, Glia, 1:1) plus the evolved best program and prints a comparison table.
+A standalone simulation repro script is provided at `blis_router/repro.py`.
+It runs all baselines (LLQ, Glia, 1:1) plus the evolved best program and prints a comparison table.
 
 ```bash
 cd sim2real/blis_router   # or wherever this folder lives
@@ -225,8 +226,8 @@ Expected output:
 BLIS Router Repro  —  model: qwen/qwen2.5-7b-instruct  |  seeds: 42+456
 ================================================================================
 Program                glia_40qps E2E   glia_40qps P95   prefix_heavy E2E   prefix_heavy P95   vs 1:1
-LLQ               |     6357 ms  |    25400 ms  |      1300 ms    |     2600 ms    | -61.0%
-Glia              |     4457 ms  |    18000 ms  |       880 ms    |     1760 ms    | -14.3%
+LLQ               |     6357 ms  |    24242 ms  |      1300 ms    |     3241 ms    | -55.1%
+Glia              |     4457 ms  |    17537 ms  |       880 ms    |     2239 ms    |  -8.8%
 1:1 (default)   * |     4314 ms  |    17241 ms  |       790 ms    |     1909 ms    | (control)
 Evolved (best)    |     4303 ms  |    16813 ms  |       700 ms    |     1435 ms    | +11.5%
 ```

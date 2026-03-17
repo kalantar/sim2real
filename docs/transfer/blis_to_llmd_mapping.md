@@ -67,6 +67,16 @@ plugin.Register(scorer.LoadAwareType, scorer.LoadAwareFactory)
 
 > **Note:** Submodule initialization was completed in PR3. All field names were verified in PR5.
 
+## Implicit Signal Dependencies (Required by Base Scoring, Not in EVOLVE-BLOCK)
+
+The following signals are NOT part of the EVOLVE-BLOCK signal set and therefore do not appear in the Signal Mapping Table above. However, they are **required by the base WeightedScoring infrastructure** (e.g., `EffectiveLoad` composite) and **MUST be populated by Stage 3 scorer implementations**.
+
+- **QueueDepth** → `endpoint.GetMetrics().WaitingQueueSize` — Required by base WeightedScoring `EffectiveLoad` composite. Not in the EVOLVE-BLOCK directly. Populated at `evolved_scorer.go:91` as `QueueDepth: m.WaitingQueueSize`. Stage 3 MUST include this population to keep EffectiveLoad computable.
+
+**EffectiveLoad production expansion:** The sim composite `EffectiveLoad() = QueueDepth + BatchSize + InFlightRequests` maps to the production expression `WaitingQueueSize + RunningRequestsSize + RunningRequestsSize`. Because `BatchSize` and `InFlightRequests` both map to `RunningRequestsSize` (see Signal Mapping Table), the production equivalent is `WaitingQueueSize + 2*RunningRequestsSize`. Stage 3 generator MUST use this expansion when implementing the EffectiveLoad composite — the full formula is not derivable from the Signal Mapping Table alone without this note.
+
+**Stage 3 contract:** Any generated scorer MUST populate `QueueDepth` from `m.WaitingQueueSize`, even though `QueueDepth` is absent from the EVOLVE-BLOCK signal list. Omitting this will cause `EffectiveLoad` to compute incorrectly.
+
 ## Notes
 
 - All v1 signals have `staleness_window_ms = 0` (approximate-scorer class).

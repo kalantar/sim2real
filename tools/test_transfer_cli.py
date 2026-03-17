@@ -642,9 +642,8 @@ class TestValidateMapping:
         run_cli("extract", str(ROUTING_DIR))
 
     @pytest.mark.skipif(
-        not (REPO_ROOT / "docs" / "transfer" / "blis_to_llmd_mapping.md").exists()
-        or "QueueDepth" in (REPO_ROOT / "docs" / "transfer" / "blis_to_llmd_mapping.md").read_text(),
-        reason="mapping file absent or has stale QueueDepth signal (pending Task 8)"
+        not (REPO_ROOT / "docs" / "transfer" / "blis_to_llmd_mapping.md").exists(),
+        reason="mapping file absent"
     )
     def test_validate_mapping_passes_with_complete_mapping(self):
         """BC-3: all signals mapped, commit hash present."""

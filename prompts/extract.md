@@ -90,8 +90,7 @@ print('Content hash:', d.get('evolve_block_content_hash'))
 **Review checklist:**
 - Verify KVUtilization has `normalization_note` with `divide_prod_by_100` action.
 - Verify CacheHitRate has `fidelity_provisional: true` if present.
-- Verify all expected signals are present (QueueDepth, BatchSize, InFlightRequests,
-  KVUtilization, CacheHitRate, SessionID for the current evolved algorithm).
+- Verify that the extracted signals match those actually referenced in the EVOLVE-BLOCK being processed. For the current blis_router EVOLVE-BLOCK, the expected signals are `InFlightRequests` and `KVUtilization`. Do **not** flag absence of `QueueDepth`, `BatchSize`, `CacheHitRate`, or `SessionID` as a bug — these signals are not present in the current EVOLVE-BLOCK. If the algorithm changes, re-verify against the new EVOLVE-BLOCK source.
 
 ## Halt Conditions
 

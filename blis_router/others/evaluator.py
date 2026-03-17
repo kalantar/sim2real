@@ -18,7 +18,7 @@ Multi-seed evaluation (default: seeds 42 and 456):
   under bursty traffic (load-balance scorer saturates). Set BLIS_SEED=42 for
   single-seed backward compatibility, or BLIS_SEED=42,456 for explicit multi-seed.
 
-Multi-LLM mode (default ON, disable with BLIS_MULTI_LLM=0):
+Multi-LLM mode (default OFF, enable with BLIS_MULTI_LLM=1):
   Runs each workload against multiple LLM model configurations (qwen_7b + qwen_14b)
   to test generalizability. The combined score averages across all seeds, models,
   and workloads. Baseline metrics include per-model breakdowns.
@@ -215,7 +215,7 @@ def _run_workloads(
 
         for seed in seeds:
             for workload_name, workload_file in WORKLOADS:
-                workload_path = script_dir / "workloads" / workload_file
+                workload_path = script_dir.parent / "workloads" / workload_file
                 cmd = _build_sim_cmd(
                     inference_sim_dir, policy_config_path, workload_path,
                     model_id, extra_args, seed=seed,
@@ -407,9 +407,9 @@ def evaluate(program_path: str) -> dict:
         )
 
     script_dir = Path(__file__).parent
-    inference_sim_dir = script_dir / "inference-sim"
+    inference_sim_dir = script_dir.parent / "inference-sim"
     routing_go_path = inference_sim_dir / "sim" / "routing.go"
-    policy_config_path = script_dir / "routing" / "routing_policy.yaml"
+    policy_config_path = script_dir.parent / "routing_config" / "routing_policy.yaml"
 
     # Verify routing.go exists (submodule must be initialized)
     if not routing_go_path.exists():

@@ -10,7 +10,7 @@
     "evolve_block_source": {
       "type": "string",
       "pattern": "^(?!/)(?!.*(?:^|/)\\.\\./)(?!.*(?:^|/)\\./).+\\.[a-zA-Z]+:\\d+-\\d+$",
-      "description": "Source file path and line range, e.g., 'routing/best_program.py:171-242'. Typically relative to the repository root; may be absolute when the routing directory is outside the repo. The pattern rejects '../' and './' path components. NOTE: The regex pattern validates format only (two digit sequences separated by a dash). It does NOT enforce start <= end on line-range values — JSON Schema regex cannot perform numeric comparisons. Consumers MUST validate start <= end programmatically if required. IMPORTANT: The .py source file contains Go code embedded in a Python triple-quoted string literal (GO_ROUTING_CODE = '\"\"\"...\"\"\"'). PR3 must parse the Python file to extract the embedded Go — do NOT treat the .py file as standalone Go source."
+      "description": "Source file path and line range, e.g., 'blis_router/best/best_program.go:177-258'. Must be a relative path from the repository root — absolute paths (starting with '/') are rejected by the pattern. The pattern also rejects '../' and './' path components. NOTE: The regex pattern validates format only (two digit sequences separated by a dash). It does NOT enforce start <= end on line-range values — JSON Schema regex cannot perform numeric comparisons. Consumers MUST validate start <= end programmatically if required. The source file is extension-agnostic (accepts .go, .py, or any alphabetic extension)."
     },
     "evolve_block_content_hash": {
       "type": "string",
