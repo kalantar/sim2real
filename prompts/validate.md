@@ -96,7 +96,7 @@ Record: mean_kendall_tau, max_abs_error, tuple_count from test output. Parse the
 Run Suite B with `-json -v` and tee to capture structured output (same pattern as Steps 2 and 4):
 
 ```bash
-go test ./tools/harness/... -run TestSuiteB_StatenessStability -v -timeout 30s -json 2>&1 | tee /tmp/suite_b_output.json
+go test ./tools/harness/... -run TestSuiteB_StalenessStability -v -timeout 30s -json 2>&1 | tee /tmp/suite_b_output.json
 ```
 
 Suite B results are informational_only=true for v1 (all signals have staleness_window_ms=0).
@@ -105,10 +105,12 @@ Do NOT halt on Suite B results.
 Extract numerical results from the captured output:
 
 ```bash
-grep -oE 'rank_stability_tau=[0-9]+\.[0-9]+|threshold_crossing_pct=[0-9]+\.[0-9]+' /tmp/suite_b_output.json
+grep -oE 'rank_stability_tau=[0-9]+\.[0-9]+|threshold_crossing_pct=[0-9]+\.[0-9]+%' /tmp/suite_b_output.json
 ```
 
-Record: rank_stability_tau, threshold_crossing_pct from test output. Parse the `t.Logf` line: `Suite B: rank_stability_tau=X.XXXX, threshold_crossing_pct=X.XX`.
+> **Note:** The `%` is part of the logged format (`"%.1f%%"` in the Go test), so `threshold_crossing_pct` appears as e.g. `threshold_crossing_pct=0.0%` in the output. The grep pattern above includes the trailing `%`.
+
+Record: rank_stability_tau, threshold_crossing_pct from test output. Parse the `t.Logf` line: `Suite B: rank_stability_tau=X.XXXX, threshold_crossing_pct=X.XX%`.
 
 ## Step 4: Suite C — Concurrent Safety and Pile-On
 

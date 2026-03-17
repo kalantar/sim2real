@@ -48,7 +48,7 @@
       "description": "Cluster benchmark mechanism check results.",
       "properties": {
         "passed":                   {"type": "boolean"},
-        "mechanism_check_verdict":  {"type": "string", "enum": ["PASS", "FAIL", "INCONCLUSIVE"]},
+        "mechanism_check_verdict":  {"type": "string", "enum": ["PASS", "FAIL", "INCONCLUSIVE", "ERROR"]},
         "t_eff":                    {"type": "number", "minimum": 0, "description": "Effective threshold from noise characterization"},
         "workload_classification":  {
           "type": "array",

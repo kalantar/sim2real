@@ -1,7 +1,7 @@
 # BLIS-to-llm-d Signal Mapping Artifact
 
 **Version:** 1.0
-**Target submodule:** llm-d-inference-scheduler (PARTIALLY VERIFIED — Scorer Interface Reference section verified against submodule at commit 091312c, PR2 Task 1. Signal Mapping Table field names and other sections remain UNVERIFIED pending PR3 submodule initialization.)
+**Target submodule:** llm-d-inference-scheduler (PARTIALLY VERIFIED — Scorer Interface Reference section verified against submodule at commit 091312c, PR2 Task 1. Signal Mapping Table field names VERIFIED in PR3/PR5 against `fwkdl.Metrics` at commit `091312c`.)
 **Pinned commit hash:** 091312c333a50e94f5e60a2ca2926e8442eeffa9 (PR3 MUST initialize the submodule at this commit and verify all claims)
 
 ## Signal Mapping Table
@@ -80,12 +80,12 @@ plugin.Register(scorer.LoadAwareType, scorer.LoadAwareFactory)
 
 **Config:** YAML-based with scorer name, type, weight, and optional parameters (JSON blob parsed by factory).
 
-> **Note for PR3:** This section is now partially verified. PR3 MUST initialize the submodule, run `go mod download`, and inspect the `fwkdl.Metrics` struct definition to confirm UNVERIFIED field names before generating scorer code.
+> **Note:** Submodule initialization was completed in PR3. All field names were verified in PR5.
 
 ## Notes
 
 - All v1 signals have `staleness_window_ms = 0` (approximate-scorer class).
-- **Temporal semantics assumption:** Sim RoutingSnapshot is a point-in-time snapshot. Production metrics are assumed to be point-in-time queries to endpoint `GetMetrics()`. PR5 must verify.
+- **Temporal semantics assumption:** Temporal semantics verified in PR5: production `endpoint.GetMetrics()` provides point-in-time snapshot metrics, consistent with sim RoutingSnapshot assumptions.
 - **EffectiveLoad() composite signal:** `EffectiveLoad() = QueueDepth + BatchSize + InFlightRequests`. Production equivalent: sum the mapped production values. PR3 scorer must implement this composite computation inline.
 - CacheHitRate mapping to PrecisePrefixCache scorer may require adaptation since production uses ZMQ-based precise metrics while sim uses approximate router-side index.
 - **Missing/default value assumption:** All production metrics are assumed to be always available from `endpoint.GetMetrics()`. If a metric field is missing, the PR3 scorer should return score 0.0 for that endpoint.

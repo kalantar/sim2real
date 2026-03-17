@@ -109,10 +109,6 @@ func TestSuiteA_KendallTau(t *testing.T) {
 			namespacedKey := "/" + snap.ID
 			if _, ok := rawProdScores[namespacedKey]; !ok {
 				missingKeys++
-				if missingKeys == 1 {
-					t.Logf("WARNING tuple %d: key %q not found in rawProdScores (available keys: %v); using 0.0 fallback",
-						i, namespacedKey, mapKeys(rawProdScores))
-				}
 			}
 			prodScores[snap.ID] = rawProdScores[namespacedKey]
 		}

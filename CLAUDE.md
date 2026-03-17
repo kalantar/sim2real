@@ -51,6 +51,12 @@ python tools/transfer_cli.py validate-schema workspace/algorithm_summary.json
 # Classify go build/test output into error classes (stdin)
 # Exit 0 = clean, 1 = error found, 2 = CLI infrastructure error
 echo "<go build/test output>" | python tools/transfer_cli.py test-status
+
+# Compute per-metric CV and T_eff from baseline latency runs
+python tools/transfer_cli.py noise-characterize --runs workspace/baseline_runs.json
+
+# Compute mechanism check from benchmark results
+python tools/transfer_cli.py benchmark --results workspace/benchmark_results.json --t-eff <float>
 ```
 
 ## Important: Artifact Consumption

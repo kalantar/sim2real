@@ -2,6 +2,8 @@ package harness
 
 import (
 	"context"
+	"fmt"
+	"os"
 
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/plugin"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/scheduling"
@@ -26,7 +28,7 @@ var _ scheduling.Scorer = &EvolvedScorer{}
 // Signal translation (from workspace/signal_coverage.json and mapping artifact):
 //   - endpoint.GetMetrics().WaitingQueueSize    → sim.RoutingSnapshot.QueueDepth
 //   - endpoint.GetMetrics().RunningRequestsSize → sim.RoutingSnapshot.InFlightRequests
-//     (F-10 single-count: BatchSize=0 in production; both sim fields combined here)
+//     (F-10 single-count: BatchSize intentionally omitted — defaults to 0; only InFlightRequests maps to RunningRequestsSize)
 //   - NormalizeKVUtilization(KVCacheUsagePercent) → sim.RoutingSnapshot.KVUtilization
 //   - CacheHitRate: 0.0 (zero fallback — no production field available)
 //   - request.Headers["x-session-token"] → sim.Request.SessionID
@@ -76,6 +78,7 @@ func (s *EvolvedScorer) Score(_ context.Context, _ *scheduling.CycleState, req *
 
 	// Build RouterState from production endpoint metrics.
 	snapshots := make([]sim.RoutingSnapshot, 0, len(endpoints))
+	seenIDs := make(map[string]struct{}, len(endpoints))
 
 	for _, ep := range endpoints {
 		m := ep.GetMetrics()
@@ -84,6 +87,10 @@ func (s *EvolvedScorer) Score(_ context.Context, _ *scheduling.CycleState, req *
 			continue
 		}
 		id := ep.String()
+		if _, dup := seenIDs[id]; dup {
+			fmt.Fprintf(os.Stderr, "EvolvedScorer.Score: duplicate endpoint ID %q detected; scores may be overwritten\n", id)
+		}
+		seenIDs[id] = struct{}{}
 		snap := sim.RoutingSnapshot{
 			ID:               id,
 			QueueDepth:       m.WaitingQueueSize,
@@ -121,6 +128,9 @@ func (s *EvolvedScorer) Score(_ context.Context, _ *scheduling.CycleState, req *
 		id := ep.String()
 		if score, ok := decision.Scores[id]; ok {
 			result[ep] = score
+		} else {
+			fmt.Fprintf(os.Stderr, "EvolvedScorer.Score: unexpected missing score for endpoint ID %q; assigning 0.0\n", id)
+			result[ep] = 0.0
 		}
 	}
 	return result

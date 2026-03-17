@@ -308,10 +308,10 @@ func (a *panicAlgorithm) Route(req *sim.Request, state *sim.RouterState) sim.Rou
 func TestEquivalence(t *testing.T) {
 	// Convenience dispatcher — runs all three suites sequentially in one invocation.
 	// NOTE: validate.md (K.10) runs suites independently via separate go test -run commands
-	// (TestSuiteA_KendallTau, TestSuiteB_StatenessStability, TestSuiteC).
+	// (TestSuiteA_KendallTau, TestSuiteB_StalenessStability, TestSuiteC).
 	// This function is for local development use only.
 	t.Run("SuiteA", TestSuiteA_KendallTau)
-	t.Run("SuiteB", TestSuiteB_StatenessStability)
+	t.Run("SuiteB", TestSuiteB_StalenessStability)
 	t.Run("SuiteC_Concurrent", TestSuiteC_ConcurrentDeterminism)
 	t.Run("SuiteC_PileOn", TestSuiteC_PileOn)
 }
@@ -373,6 +373,57 @@ func TestLoadAlgorithmReturnsEvolved(t *testing.T) {
 	if kvDecision.Scores["high-kv"] >= kvDecision.Scores["low-kv"] {
 		t.Errorf("expected high-kv score < low-kv score; got high=%f low=%f",
 			kvDecision.Scores["high-kv"], kvDecision.Scores["low-kv"])
+	}
+}
+
+// TestEvolvedAlgorithmSingleEndpoint verifies that a single endpoint still receives
+// a non-zero score and that the KV penalty fires correctly when KVUtilization > 0.82.
+// BC-I11: single-endpoint edge case.
+func TestEvolvedAlgorithmSingleEndpoint(t *testing.T) {
+	alg := newEvolvedAlgorithm()
+
+	state := sim.RouterState{
+		Snapshots: []sim.RoutingSnapshot{
+			{ID: "solo", QueueDepth: 0, InFlightRequests: 0, KVUtilization: 0.90},
+		},
+	}
+	decision := alg.Route(&sim.Request{ID: "r-single"}, &state)
+
+	score, ok := decision.Scores["solo"]
+	if !ok {
+		t.Fatal("expected score for 'solo' endpoint, got none")
+	}
+	if score <= 0.0 {
+		t.Errorf("expected positive score for sole endpoint, got %f", score)
+	}
+	// KV penalty fires: max(0.3, 1-(0.90-0.82)*2) = max(0.3, 0.84) = 0.84
+	// Base score may vary but the KV penalty multiplies it down from 1.0.
+	if score >= 1.0 {
+		t.Errorf("expected score < 1.0 (KV penalty applied), got %f", score)
+	}
+}
+
+// TestEvolvedAlgorithmKVPenaltyBoundary verifies that the KV penalty does NOT fire
+// at exactly KVUtilization=0.82 (condition is strictly > 0.82).
+// BC-I12: penalty boundary condition.
+func TestEvolvedAlgorithmKVPenaltyBoundary(t *testing.T) {
+	alg := newEvolvedAlgorithm()
+
+	state := sim.RouterState{
+		Snapshots: []sim.RoutingSnapshot{
+			{ID: "ep-0", QueueDepth: 0, InFlightRequests: 0, KVUtilization: 0.82},
+			{ID: "ep-1", QueueDepth: 0, InFlightRequests: 0, KVUtilization: 0.82},
+		},
+	}
+	decision := alg.Route(&sim.Request{ID: "r-boundary"}, &state)
+
+	score0, ok0 := decision.Scores["ep-0"]
+	score1, ok1 := decision.Scores["ep-1"]
+	if !ok0 || !ok1 {
+		t.Fatalf("expected scores for both endpoints; ep-0 ok=%v ep-1 ok=%v", ok0, ok1)
+	}
+	if score0 != score1 {
+		t.Errorf("expected equal scores at KV=0.82 (penalty does not fire); got ep-0=%f ep-1=%f", score0, score1)
 	}
 }
 

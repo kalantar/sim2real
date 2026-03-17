@@ -1400,3 +1400,86 @@ def test_benchmark_missing_workloads_key(tmp_path):
     assert result.returncode == 2, f"Expected exit 2, got {result.returncode}"
     output = json.loads(result.stdout)
     assert output["status"] == "error"
+
+
+def test_benchmark_no_matched_workloads(tmp_path):
+    """S5: all workloads have classification='unmatched' (key present) → exit 2, 'no matched workloads'."""
+    results = {
+        "workloads": [
+            {"name": "batch1", "classification": "unmatched",
+             "baseline_p99": 0.40, "transfer_p99": 0.41},
+            {"name": "batch2", "classification": "unmatched",
+             "baseline_p99": 0.35, "transfer_p99": 0.34},
+        ]
+    }
+    results_file = tmp_path / "results.json"
+    results_file.write_text(json.dumps(results))
+
+    env = {**os.environ, "_SIM2REAL_ALLOWED_ROOT": str(tmp_path)}
+    result = subprocess.run(
+        [sys.executable, "tools/transfer_cli.py", "benchmark",
+         "--results", str(results_file), "--t-eff", "0.10"],
+        capture_output=True, text=True, env=env
+    )
+    assert result.returncode == 2, f"Expected exit 2, got {result.returncode}"
+    output = json.loads(result.stdout)
+    assert any("no matched workloads" in e.lower() for e in output.get("errors", [])), \
+        f"Expected 'no matched workloads' in errors, got: {output.get('errors')}"
+
+
+class TestValidateSchemaValidationResults:
+    """BC-1 schema roundtrip tests for validation_results.json."""
+
+    def _make_valid_fixture(self):
+        return {
+            "suite_a": {
+                "passed": True,
+                "kendall_tau": 0.85,
+                "max_abs_error": 0.02,
+                "tuple_count": 100
+            },
+            "suite_b": {
+                "passed": True,
+                "rank_stability_tau": 0.90,
+                "threshold_crossing_pct": 5.0,
+                "informational_only": True
+            },
+            "suite_c": {
+                "passed": True,
+                "deterministic": True,
+                "max_pile_on_ratio": 1.2
+            },
+            "benchmark": {
+                "passed": True,
+                "mechanism_check_verdict": "PASS",
+                "t_eff": 0.10
+            },
+            "overall_verdict": "PASS",
+            "noise_cv": 0.05
+        }
+
+    def test_valid_validation_results_passes(self):
+        """BC-1: minimal valid validation_results.json passes schema validation (exit 0)."""
+        WORKSPACE.mkdir(exist_ok=True)
+        artifact_path = WORKSPACE / "validation_results.json"
+        try:
+            artifact_path.write_text(json.dumps(self._make_valid_fixture()))
+            code, output = run_cli("validate-schema", str(artifact_path))
+            assert code == 0, f"Expected exit 0, got {code}: {output}"
+        finally:
+            if artifact_path.exists():
+                artifact_path.unlink()
+
+    def test_missing_required_field_fails(self):
+        """BC-1: validation_results.json missing 'overall_verdict' fails schema validation (exit 1)."""
+        WORKSPACE.mkdir(exist_ok=True)
+        artifact_path = WORKSPACE / "validation_results.json"
+        try:
+            fixture = self._make_valid_fixture()
+            del fixture["overall_verdict"]
+            artifact_path.write_text(json.dumps(fixture))
+            code, output = run_cli("validate-schema", str(artifact_path))
+            assert code == 1, f"Expected exit 1, got {code}: {output}"
+        finally:
+            if artifact_path.exists():
+                artifact_path.unlink()

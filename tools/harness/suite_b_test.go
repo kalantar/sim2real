@@ -70,15 +70,15 @@ func runSuiteB(t *testing.T) SuiteBResult {
 	}
 
 	return SuiteBResult{
-		Passed:               true,
+		Passed:               meanTau >= 0.99,
 		RankStabilityTau:     meanTau,
 		ThresholdCrossingPct: 0.0,
 		InformationalOnly:    true,
 	}
 }
 
-// TestSuiteB_StatenessStability verifies BC-8.
-func TestSuiteB_StatenessStability(t *testing.T) {
+// TestSuiteB_StalenessStability verifies BC-8.
+func TestSuiteB_StalenessStability(t *testing.T) {
 	result := runSuiteB(t)
 
 	if !result.InformationalOnly {
