@@ -13,6 +13,7 @@ All commands output JSON to stdout.
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -21,6 +22,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 WORKSPACE = REPO_ROOT / "workspace"
 SCHEMAS_DIR = Path(__file__).resolve().parent / "schemas"
 MAPPING_PATH = REPO_ROOT / "docs" / "transfer" / "blis_to_llmd_mapping.md"
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 
 # RoutingSnapshot fields and their Go types (from inference-sim/sim/routing.go)
 # SYNC NOTE: This dict is derived from the struct at the pinned submodule commit.
@@ -918,6 +920,87 @@ def cmd_test_status(args: argparse.Namespace) -> int:
                    errors=primary_errors)
 
 
+# ─── noise-characterize ───────────────────────────────────────────────────────
+
+def _cmd_noise_characterize(args: argparse.Namespace) -> int:
+    """Compute per-metric CV and T_eff from baseline latency runs.
+
+    Input JSON format:
+        {"runs": [{"p50": float, "p95": float, "p99": float}, ...]}
+
+    Exit codes:
+        0 = success (halt=false)
+        1 = validation failure (halt=true, CV > 15%)
+        2 = infrastructure error (file missing or invalid JSON)
+    """
+    import math
+
+    runs_path = Path(args.runs).resolve()
+    allowed_root = Path(os.environ["_SIM2REAL_ALLOWED_ROOT"]).resolve() if "_SIM2REAL_ALLOWED_ROOT" in os.environ else REPO_ROOT
+    if not runs_path.is_relative_to(allowed_root):
+        return _output("error", 2,
+                       errors=[f"Runs path '{runs_path}' is outside allowed root '{allowed_root}'."],
+                       per_metric_cv={}, t_eff=0.0, halt=False)
+    if not runs_path.exists():
+        return _output("error", 2, errors=[f"runs file not found: {args.runs}"],
+                       per_metric_cv={}, t_eff=0.0, halt=False)
+
+    if runs_path.stat().st_size > MAX_FILE_SIZE:
+        return _output("error", 2,
+                       errors=[f"runs file exceeds {MAX_FILE_SIZE} bytes: {args.runs}"],
+                       per_metric_cv={}, t_eff=0.0, halt=False)
+
+    try:
+        data = json.loads(runs_path.read_text())
+    except json.JSONDecodeError as e:
+        return _output("error", 2, errors=[f"invalid JSON in {args.runs}: {e}"],
+                       per_metric_cv={}, t_eff=0.0, halt=False)
+
+    if not isinstance(data, dict) or "runs" not in data:
+        return _output("error", 2,
+                       errors=["missing 'runs' key in input JSON"],
+                       per_metric_cv={}, t_eff=0.0, halt=False)
+
+    runs = data["runs"]
+    if not isinstance(runs, list) or len(runs) == 0:
+        return _output("error", 2,
+                       errors=["'runs' must be a non-empty list (BC-16: malformed input → exit 2)"],
+                       per_metric_cv={}, t_eff=0.0, halt=False)
+
+    metrics = ["p50", "p95", "p99"]
+    per_metric_cv: dict[str, float] = {}
+
+    for metric in metrics:
+        values = [r[metric] for r in runs if isinstance(r, dict) and metric in r
+                  and isinstance(r[metric], (int, float)) and r[metric] > 0]
+        if len(values) < 2:
+            continue
+
+        mean = sum(values) / len(values)
+        if mean == 0:
+            continue
+        # Sample variance (Bessel's correction: n-1)
+        variance = sum((v - mean) ** 2 for v in values) / (len(values) - 1)
+        std = math.sqrt(variance)
+        per_metric_cv[metric] = std / mean
+
+    if not per_metric_cv:
+        n_runs = len([r for r in runs if isinstance(r, dict)])
+        return _output("error", 2,
+                       errors=[f"insufficient runs for CV computation: need ≥2 data points per metric, got {n_runs} run(s) with valid latency values"],
+                       per_metric_cv={}, t_eff=0.0, halt=False)
+
+    max_cv = max(per_metric_cv.values())
+    t_eff = max(0.05, 2.0 * max_cv)
+    halt = max_cv > 0.15
+
+    if halt:
+        return _output("error", 1, per_metric_cv=per_metric_cv, t_eff=t_eff, halt=True,
+                       errors=[f"noise too high: max CV={max_cv:.4f} > 0.15 threshold"])
+
+    return _output("ok", 0, per_metric_cv=per_metric_cv, t_eff=t_eff, halt=False)
+
+
 def main():
     if sys.version_info < (3, 10):
         print("ERROR: transfer_cli.py requires Python >= 3.10 "
@@ -955,6 +1038,13 @@ def main():
     p_test_status = subparsers.add_parser("test-status",
         help="Classify errors from go build/test output (reads stdin)")
     p_test_status.set_defaults(func=cmd_test_status)
+
+    # noise-characterize subcommand
+    p_noise = subparsers.add_parser("noise-characterize",
+        help="Compute per-metric CV and T_eff from baseline latency runs")
+    p_noise.add_argument("--runs", required=True,
+        help="Path to JSON file with baseline latency runs: {runs: [{p50, p95, p99}]}")
+    p_noise.set_defaults(func=_cmd_noise_characterize)
 
     args = parser.parse_args()
     exit_code = args.func(args)

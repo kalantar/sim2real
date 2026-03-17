@@ -1206,3 +1206,75 @@ class TestMetricsTypeGuard:
             )
             stdout = json.loads(result.stdout)
             assert "status" in stdout
+
+
+def test_noise_characterize_halts_on_high_cv(tmp_path):
+    """BC-11: CV > 15% causes halt=true and exit code 1."""
+    runs = {"runs": [{"p99": v} for v in [0.40, 0.80, 0.20, 0.60, 0.30]]}  # CV ≈ 0.47
+    runs_file = tmp_path / "baseline_runs.json"
+    runs_file.write_text(json.dumps(runs))
+
+    env = {**os.environ, "_SIM2REAL_ALLOWED_ROOT": str(tmp_path)}
+    result = subprocess.run(
+        [sys.executable, "tools/transfer_cli.py", "noise-characterize", "--runs", str(runs_file)],
+        capture_output=True, text=True, env=env
+    )
+    assert result.returncode == 1, f"Expected exit 1, got {result.returncode}"
+    output = json.loads(result.stdout)
+    assert output["halt"] is True
+    assert output["status"] == "error"
+
+
+def test_noise_characterize_malformed_input(tmp_path):
+    """BC-16: malformed JSON input causes exit code 2 (infrastructure error)."""
+    runs_file = tmp_path / "bad_runs.json"
+    runs_file.write_text("{invalid json")
+
+    env = {**os.environ, "_SIM2REAL_ALLOWED_ROOT": str(tmp_path)}
+    result = subprocess.run(
+        [sys.executable, "tools/transfer_cli.py", "noise-characterize", "--runs", str(runs_file)],
+        capture_output=True, text=True, env=env
+    )
+    assert result.returncode == 2, f"Expected exit 2, got {result.returncode}"
+    output = json.loads(result.stdout)
+    assert output["status"] == "error"
+
+
+def test_noise_characterize_empty_runs(tmp_path):
+    """BC-16: empty runs list is infrastructure error (no data to compute CV) — exit code 2."""
+    runs_file = tmp_path / "empty_runs.json"
+    runs_file.write_text('{"runs": []}')
+
+    env = {**os.environ, "_SIM2REAL_ALLOWED_ROOT": str(tmp_path)}
+    result = subprocess.run(
+        [sys.executable, "tools/transfer_cli.py", "noise-characterize", "--runs", str(runs_file)],
+        capture_output=True, text=True, env=env
+    )
+    assert result.returncode == 2, f"Expected exit 2, got {result.returncode}"
+    output = json.loads(result.stdout)
+    assert output["status"] == "error"
+
+
+def test_noise_characterize_t_eff_computation(tmp_path):
+    """BC-12: T_eff = max(0.05, 2*max_cv) using sample std (Bessel's correction)."""
+    runs = {"runs": [{"p99": v} for v in [0.40, 0.42, 0.41, 0.39, 0.41]]}
+    runs_file = tmp_path / "baseline_runs.json"
+    runs_file.write_text(json.dumps(runs))
+
+    env = {**os.environ, "_SIM2REAL_ALLOWED_ROOT": str(tmp_path)}
+    result = subprocess.run(
+        [sys.executable, "tools/transfer_cli.py", "noise-characterize", "--runs", str(runs_file)],
+        capture_output=True, text=True, env=env
+    )
+    assert result.returncode == 0, f"Expected exit 0, got {result.returncode}: {result.stdout}"
+    output = json.loads(result.stdout)
+    assert output["halt"] is False
+    assert output["status"] == "ok"
+    assert "per_metric_cv" in output, "missing per_metric_cv in output"
+    assert "p99" in output["per_metric_cv"], "missing p99 in per_metric_cv"
+    expected_cv = 0.02809
+    assert abs(output["per_metric_cv"]["p99"] - expected_cv) < 0.002, \
+        f"Expected p99 CV ≈ {expected_cv}, got {output['per_metric_cv']['p99']}"
+    expected_t_eff = max(0.05, 2 * expected_cv)
+    assert abs(output["t_eff"] - expected_t_eff) < 0.002, \
+        f"Expected T_eff ≈ {expected_t_eff}, got {output['t_eff']}"
