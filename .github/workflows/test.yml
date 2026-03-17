@@ -22,6 +22,18 @@ jobs:
       - name: Checkout llm-d-inference-scheduler submodule
         run: git submodule update --init llm-d-inference-scheduler
 
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Build Go harness
+        run: go build ./tools/harness/...
+
+      - name: Test Go harness
+        run: go test ./tools/harness/... -race -timeout 120s -count=1
+        # Suite A (blis rank-correlation) is excluded via the `suitea` build tag —
+        # it requires blis_weighted_scoring.go (Stage 3 output) which is not committed.
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

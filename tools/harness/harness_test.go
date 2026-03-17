@@ -303,14 +303,12 @@ func (a *panicAlgorithm) Route(req *sim.Request, state *sim.RouterState) sim.Rou
 	return sim.NewRoutingDecisionWithScores(state.Snapshots[0].ID, "ok", scores)
 }
 
-// TestEquivalence is the entry point that PR5 suites call.
-// PR3 provides a minimal placeholder; PR5 adds Suite A/B/C logic.
+// TestEquivalence is a convenience dispatcher for local development.
+// NOTE: validate.md (K.10) runs suites independently via separate go test -run commands.
+// Suite A requires the suitea build tag and pipeline artifacts:
+//
+//	go test -tags suitea -run TestSuiteA_KendallTau ./tools/harness/...
 func TestEquivalence(t *testing.T) {
-	// Convenience dispatcher — runs all three suites sequentially in one invocation.
-	// NOTE: validate.md (K.10) runs suites independently via separate go test -run commands
-	// (TestSuiteA_KendallTau, TestSuiteB_StalenessStability, TestSuiteC).
-	// This function is for local development use only.
-	t.Run("SuiteA", TestSuiteA_KendallTau)
 	t.Run("SuiteB", TestSuiteB_StalenessStability)
 	t.Run("SuiteC_Concurrent", TestSuiteC_ConcurrentDeterminism)
 	t.Run("SuiteC_PileOn", TestSuiteC_PileOn)

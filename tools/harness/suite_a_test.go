@@ -1,3 +1,5 @@
+//go:build suitea
+
 package harness
 
 import (
