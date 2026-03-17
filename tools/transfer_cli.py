@@ -297,20 +297,27 @@ def _check_fidelity(signals: list[dict], *, strict: bool = False) -> tuple[bool,
     for sig in signals:
         if sig["type"] == "unknown":
             continue  # Already flagged for downstream resolution via type='unknown'
-        pattern = rf'\|\s*{re.escape(sig["name"])}(?:\s*\([^)]*\))?\s*\|(?:[^|]*\|){{{MAIN_TABLE_FIDELITY_COL_OFFSET}}}\s*(low|medium|high)\s*(?:\*\(provisional\)\*)?\s*\|'
+        pattern = rf'\|\s*{re.escape(sig["name"])}(?:\s*\([^)]*\))?\s*\|(?:[^|]*\|){{{MAIN_TABLE_FIDELITY_COL_OFFSET}}}\s*(low|medium|high)\s*(?:\*\([^)]*\)\*)?\s*\|'
         match = re.search(pattern, content, re.IGNORECASE)
         if not match:
-            pattern_alt = rf'\|\s*{re.escape(sig["name"])}(?:\s*\([^)]*\))?\s*\|(?:[^|]*\|){{{ADDITIONAL_TABLE_FIDELITY_COL_OFFSET}}}\s*(low|medium|high)\s*(?:\*\(provisional\)\*)?\s*\|'
+            pattern_alt = rf'\|\s*{re.escape(sig["name"])}(?:\s*\([^)]*\))?\s*\|(?:[^|]*\|){{{ADDITIONAL_TABLE_FIDELITY_COL_OFFSET}}}\s*(low|medium|high)\s*(?:\*\([^)]*\)\*)?\s*\|'
             match = re.search(pattern_alt, content, re.IGNORECASE)
         if match:
             rating = match.group(1).lower()
-            is_provisional = "*(provisional)*" in match.group(0)
+            match_text = match.group(0)
+            is_provisional = "*(provisional)*" in match_text
+            is_zeroed = "*(zeroed" in match_text
             if is_provisional:
                 print(f"WARNING: Signal '{sig['name']}' has provisional {rating} fidelity rating. "
                       f"No empirical data supports this rating — PR5 must validate.",
                       file=sys.stderr)
                 sig["fidelity_provisional"] = True
-            if rating == "low":
+            if is_zeroed:
+                print(f"NOTICE: Signal '{sig['name']}' has {rating} fidelity but is zeroed in "
+                      f"production scorer — pipeline continues.",
+                      file=sys.stderr)
+                sig["fidelity_zeroed"] = True
+            elif rating == "low":
                 errors.append(
                     f"Signal '{sig['name']}' has low fidelity rating — "
                     f"pipeline halted (low-fidelity signals not supported in v1)"
@@ -528,6 +535,51 @@ def cmd_validate_mapping(args: argparse.Namespace) -> int:
                         mapping_complete=False, missing_signals=[], extra_signals=[],
                         duplicate_signals=[], double_counting_risks=[], stale_commit=False)
 
+    # Read and validate mapping format before loading the algorithm summary.
+    # Malformed table check (exit 1) must precede summary checks (exit 2) so
+    # tests that write a malformed mapping see exit 1 regardless of summary state.
+    MAX_MAPPING_SIZE = 10 * 1024 * 1024
+    try:
+        _mapping_size = MAPPING_PATH.stat().st_size
+    except OSError as e:
+        return _output("error", 2,
+                        errors=[f"Failed to stat mapping artifact: {e}"],
+                        output_type="mapping_validation",
+                        mapping_complete=False, missing_signals=[], extra_signals=[],
+                        duplicate_signals=[], double_counting_risks=[], stale_commit=False)
+    if _mapping_size > MAX_MAPPING_SIZE:
+        return _output("error", 2,
+                        errors=[f"Mapping artifact exceeds {MAX_MAPPING_SIZE} bytes — refusing to read."],
+                        output_type="mapping_validation",
+                        mapping_complete=False, missing_signals=[], extra_signals=[],
+                        duplicate_signals=[], double_counting_risks=[], stale_commit=False)
+
+    try:
+        content = MAPPING_PATH.read_text()
+    except OSError as e:
+        return _output("error", 2,
+                        errors=[f"Failed to read mapping artifact: {e}"],
+                        output_type="mapping_validation",
+                        mapping_complete=False, missing_signals=[], extra_signals=[],
+                        duplicate_signals=[], double_counting_risks=[], stale_commit=False)
+
+    # Detect malformed mapping artifact
+    if '|' not in content or not re.search(r'^\|.*\|.*\|', content, re.MULTILINE):
+        # Check commit hash even in malformed-table case so stale_commit
+        # reflects actual hash presence, not a side effect of table parsing.
+        has_commit_in_malformed = bool(re.search(
+            r'(?:commit[_ ]hash|pinned[_ ]commit[_ ]hash)[:\s*]*([0-9a-f]{7,40})',
+            content, re.IGNORECASE,
+        ))
+        return _output("error", 1,
+                        errors=["Malformed mapping artifact: no Markdown table found. "
+                                "Expected pipe-delimited table rows."],
+                        output_type="mapping_validation",
+                        mapping_complete=False, missing_signals=[], extra_signals=[],
+                        duplicate_signals=[], double_counting_risks=[],
+                        stale_commit=not has_commit_in_malformed)
+
+    # Load algorithm summary after mapping format is validated.
     summary_path = args.summary if hasattr(args, "summary") and args.summary else (
         WORKSPACE / "algorithm_summary.json"
     )
@@ -579,47 +631,6 @@ def cmd_validate_mapping(args: argparse.Namespace) -> int:
                         output_type="mapping_validation",
                         mapping_complete=False, missing_signals=[], extra_signals=[],
                         duplicate_signals=[], double_counting_risks=[], stale_commit=False)
-
-    MAX_MAPPING_SIZE = 10 * 1024 * 1024
-    try:
-        _mapping_size = MAPPING_PATH.stat().st_size
-    except OSError as e:
-        return _output("error", 2,
-                        errors=[f"Failed to stat mapping artifact: {e}"],
-                        output_type="mapping_validation",
-                        mapping_complete=False, missing_signals=[], extra_signals=[],
-                        duplicate_signals=[], double_counting_risks=[], stale_commit=False)
-    if _mapping_size > MAX_MAPPING_SIZE:
-        return _output("error", 2,
-                        errors=[f"Mapping artifact exceeds {MAX_MAPPING_SIZE} bytes — refusing to read."],
-                        output_type="mapping_validation",
-                        mapping_complete=False, missing_signals=[], extra_signals=[],
-                        duplicate_signals=[], double_counting_risks=[], stale_commit=False)
-
-    try:
-        content = MAPPING_PATH.read_text()
-    except OSError as e:
-        return _output("error", 2,
-                        errors=[f"Failed to read mapping artifact: {e}"],
-                        output_type="mapping_validation",
-                        mapping_complete=False, missing_signals=[], extra_signals=[],
-                        duplicate_signals=[], double_counting_risks=[], stale_commit=False)
-
-    # Detect malformed mapping artifact
-    if '|' not in content or not re.search(r'^\|.*\|.*\|', content, re.MULTILINE):
-        # Check commit hash even in malformed-table case so stale_commit
-        # reflects actual hash presence, not a side effect of table parsing.
-        has_commit_in_malformed = bool(re.search(
-            r'(?:commit[_ ]hash|pinned[_ ]commit[_ ]hash)[:\s*]*([0-9a-f]{7,40})',
-            content, re.IGNORECASE,
-        ))
-        return _output("error", 1,
-                        errors=["Malformed mapping artifact: no Markdown table found. "
-                                "Expected pipe-delimited table rows."],
-                        output_type="mapping_validation",
-                        mapping_complete=False, missing_signals=[], extra_signals=[],
-                        duplicate_signals=[], double_counting_risks=[],
-                        stale_commit=not has_commit_in_malformed)
 
     # Check each extracted signal has a mapping entry (allow optional parenthetical annotation)
     missing = [name for name in sorted(extracted_names)

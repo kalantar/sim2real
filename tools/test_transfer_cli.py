@@ -971,18 +971,21 @@ class TestFidelityHalt:
         reason="Mapping artifact not present (pre-Task 5)"
     )
     def test_provisional_detection_matches_mapping_format(self):
-        """R2-F-13: Verify *(provisional)* detection works against actual mapping."""
+        """R2-F-13: Verify *(zeroed ...)* annotation detection works against actual mapping."""
         mapping = REPO_ROOT / "docs" / "transfer" / "blis_to_llmd_mapping.md"
         if not mapping.exists():
             pytest.skip("Mapping artifact not present")
         content = mapping.read_text()
-        assert "*(provisional)*" in content
+        assert "*(zeroed" in content, (
+            "Mapping should contain at least one *(zeroed ...)* annotation "
+            "(CacheHitRate and BatchSize are zeroed in PR5)"
+        )
         code, output = run_cli("extract", str(ROUTING_DIR))
         assert code == 0
         summary = json.loads((WORKSPACE / "algorithm_summary.json").read_text())
         cache_hit = [s for s in summary["signals"] if s["name"] == "CacheHitRate"]
         assert len(cache_hit) == 1
-        assert cache_hit[0].get("fidelity_provisional") is True
+        assert cache_hit[0].get("fidelity_zeroed") is True
 
     @pytest.mark.skipif(
         not (Path(__file__).parent.parent / "docs" / "transfer" / "blis_to_llmd_mapping.md").exists(),

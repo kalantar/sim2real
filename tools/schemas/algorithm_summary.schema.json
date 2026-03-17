@@ -42,6 +42,10 @@
           "fidelity_provisional": {
             "type": "boolean",
             "description": "Set to true when the signal's fidelity rating in the mapping artifact is annotated as *(provisional)*. When true, PR5 empirical validation is required before the rating can be considered stable."
+          },
+          "fidelity_zeroed": {
+            "type": "boolean",
+            "description": "Set to true when the signal has low fidelity but is intentionally zeroed in the production scorer (annotated as *(zeroed ...)*). The pipeline continues because the signal has no effect on scoring."
           }
         }
       }
