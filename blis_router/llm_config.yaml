@@ -1,0 +1,47 @@
+# LLM Configuration for Sim2Real Transfer
+# All values from BLIS defaults.yaml — trained on real vLLM traces
+
+model:
+  id: qwen/qwen2.5-7b-instruct
+  hf_repo: Qwen/Qwen2.5-7B-Instruct
+
+hardware:
+  gpu: H100
+  memory_gib: 80.0
+  tflops_peak: 989.5
+  bw_peak_tbs: 3.35
+
+serving:
+  tensor_parallelism: 1
+  vllm_version: vllm/vllm-openai:v0.11.0
+
+# vLLM-equivalent parameters (from BLIS defaults.yaml, measured on real vLLM)
+vllm_config:
+  total_kv_blocks: 67659          # Measured from real vLLM on H100 TP=1
+  block_size_in_tokens: 16        # vLLM default
+  max_num_running_reqs: 256       # vLLM default (max concurrent requests in batch)
+  max_num_scheduled_tokens: 2048  # Chunked prefill threshold
+  max_model_len: 0                # Unlimited (model's native context window)
+  gpu_memory_utilization: 0.90    # Typical vLLM default
+
+# Latency model: blackbox (trained alpha/beta regression on real vLLM traces)
+latency_model:
+  type: blackbox
+  alpha_coeffs: [4680.303204056608, 0.0, 0.0]
+  beta_coeffs: [7051.796874715078, 19.538416565504026, 25.431830886933543]
+  best_loss: 489.87  # Regression fit quality (lower = better)
+
+cluster:
+  num_instances: 4
+  snapshot_refresh_interval_us: 5000000  # 5 seconds (Prometheus scrape cycle)
+  seeds: [42, 456]
+
+# To deploy on real llm-d:
+#   python -m vllm.entrypoints.openai.api_server \
+#     --model Qwen/Qwen2.5-7B-Instruct \
+#     --tensor-parallel-size 1 \
+#     --gpu-memory-utilization 0.90 \
+#     --block-size 16 \
+#     --max-num-seqs 256 \
+#     --max-num-batched-tokens 2048 \
+#     --port 800X

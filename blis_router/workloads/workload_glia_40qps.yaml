@@ -1,0 +1,81 @@
+# Exact Glia paper workload (Hamadanian et al., arXiv:2510.27176, Section 5)
+#
+# ShareGPT-like token distributions:
+#   - Prompt: mean ~500 tokens, heavy-tailed
+#   - Decode: mean ~250 tokens, heavy-tailed
+# 7.5 QPS with bursty arrivals (log-normal σ=2 ≈ gamma CV=7.3)
+# Heavy-tail inflation (Section 5):
+#   - 5% of prompts inflated 10x
+#   - 5% of decodes inflated 10x
+#
+# No prefix groups — this is a vanilla ShareGPT workload matching the Glia paper
+# exactly (Vidur does not model prefix caching).
+#
+# 1000 requests at 7.5 req/s (~133 seconds simulated).
+
+version: "1"
+seed: 42
+category: language
+aggregate_rate: 40.0
+num_requests: 1000
+
+clients:
+  # --- Main ShareGPT traffic (90%) ---
+  - id: "sharegpt-main"
+    slo_class: "interactive"
+    rate_fraction: 0.90
+    streaming: true
+    arrival:
+      process: gamma
+      cv: 7.3
+    input_distribution:
+      type: gaussian
+      params:
+        mean: 500
+        std_dev: 300
+        min: 10
+        max: 2000
+    output_distribution:
+      type: exponential
+      params:
+        mean: 250
+
+  # --- Heavy tail: 5% inflated prompts (10x mean, per Glia Section 5) ---
+  - id: "heavy-prompt"
+    slo_class: "interactive"
+    rate_fraction: 0.05
+    streaming: true
+    arrival:
+      process: gamma
+      cv: 7.3
+    input_distribution:
+      type: gaussian
+      params:
+        mean: 5000
+        std_dev: 2000
+        min: 1000
+        max: 15000
+    output_distribution:
+      type: exponential
+      params:
+        mean: 250
+
+  # --- Heavy tail: 5% inflated decodes (10x mean, per Glia Section 5) ---
+  - id: "heavy-decode"
+    slo_class: "interactive"
+    rate_fraction: 0.05
+    streaming: true
+    arrival:
+      process: gamma
+      cv: 7.3
+    input_distribution:
+      type: gaussian
+      params:
+        mean: 500
+        std_dev: 300
+        min: 10
+        max: 2000
+    output_distribution:
+      type: exponential
+      params:
+        mean: 2500

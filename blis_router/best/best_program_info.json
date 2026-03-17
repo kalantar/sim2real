@@ -1,0 +1,53 @@
+{
+  "id": "bac94878-20ed-4fa0-aa15-6ce18212d231",
+  "generation": 1,
+  "iteration": 16,
+  "timestamp": 1773339552.938553,
+  "parent_id": "56691080-de94-47cd-aa84-39204fe92380",
+  "metrics": {
+    "combined_score": 11.464534120276209,
+    "avg_e2e_ms": 2501.3791490833337,
+    "avg_p95_ms": 9123.789987499991,
+    "glia_40qps_e2e_ms": 4302.613664500001,
+    "prefix_heavy_e2e_ms": 700.1446336666667,
+    "success_rate": 1.0,
+    "num_successful": 4,
+    "num_failed": 0,
+    "artifacts": {
+      "workload_results": {
+        "glia_40qps": {
+          "e2e_ms": 4302.613664500001,
+          "e2e_p95_ms": 16812.609199999984,
+          "completed_requests": 1000,
+          "ttft_mean_ms": 161.038976,
+          "tokens_per_sec": 5132.844849654286
+        },
+        "prefix_heavy": {
+          "e2e_ms": 700.1446336666667,
+          "e2e_p95_ms": 1434.9707749999998,
+          "completed_requests": 1500,
+          "ttft_mean_ms": 99.71534600000001,
+          "tokens_per_sec": 6071.261232788446
+        }
+      },
+      "successful_workloads": 4,
+      "failed_workloads": 0,
+      "success_rate": "100%"
+    }
+  },
+  "language": "python",
+  "saved_at": 1773340800.570737,
+  "baseline_metrics": {
+    "seeds": [
+      "42",
+      "456"
+    ],
+    "glia_40qps_e2e_ms": 4314.379940999999,
+    "glia_40qps_p95_ms": 17241.308399999998,
+    "prefix_heavy_e2e_ms": 790.235141,
+    "prefix_heavy_p95_ms": 1908.5373749999994,
+    "avg_e2e_ms": 2552.3075409999997,
+    "avg_p95_ms": 9574.922887499999,
+    "combined_score": -6063.61521425
+  }
+}
