@@ -102,6 +102,22 @@ PR3 prompt templates MUST consume these PR1 artifacts:
 1. **Stage 4 success state:** Stage 4 success means `go build ./...`, `go vet ./...`, and `go test ./pkg/plugins/scorer/... -v` all pass in the llm-d-inference-scheduler submodule. There is no `stage4_output.json` — PR5 reads generated code paths from `stage3_output.json`.
 2. **Retry state not persisted:** Retry counters live only in the interactive session. If Stage 4 halts and the operator restarts, counters reset to zero.
 
+### PR5 Deliverables
+
+- `tools/harness/evolved_algorithm.go` — EVOLVE-BLOCK penalty logic (replaces trivialAlgorithm in LoadAlgorithm)
+- `tools/harness/evolved_scorer.go` — Wired EvolvedScorer.Score() with production metric translation
+- `tools/harness/stats.go` — Kendall-tau rank correlation utility
+- `tools/harness/suite_a_test.go` — Suite A: 200-tuple rank correlation equivalence (BC-6, BC-7)
+- `tools/harness/suite_b_test.go` — Suite B: staleness rank stability, v1 informational (BC-8)
+- `tools/harness/suite_c_test.go` — Suite C: concurrent safety + pile-on check (BC-9, BC-10)
+- `tools/schemas/validation_results.schema.json` — Schema for Stage 5 output artifact
+- `prompts/validate.md` — Stage 5 prompt template
+- `docs/transfer/noise_characterization.md` — Noise characterization procedure
+- `docs/transfer/calibration_log.md` — Per-transfer calibration log template
+- CLI commands: `noise-characterize`, `benchmark` in `tools/transfer_cli.py`
+
+**Key contracts:** Suite A Kendall-tau > 0.8, Suite C determinism + pile-on ≤ 2.0, noise CV ≤ 15%
+
 ## Algorithm Logic Boundary
 
 PR1 captures *what signals the algorithm reads* (signal metadata: names, types, access paths, normalization). PR3 captures *what the algorithm does with those signals* (behavioral logic). Concretely, "algorithm logic" means:

@@ -306,7 +306,14 @@ func (a *panicAlgorithm) Route(req *sim.Request, state *sim.RouterState) sim.Rou
 // TestEquivalence is the entry point that PR5 suites call.
 // PR3 provides a minimal placeholder; PR5 adds Suite A/B/C logic.
 func TestEquivalence(t *testing.T) {
-	t.Log("TestEquivalence: PR3 placeholder — PR5 adds Suite A/B/C logic")
+	// Convenience dispatcher — runs all three suites sequentially in one invocation.
+	// NOTE: validate.md (K.10) runs suites independently via separate go test -run commands
+	// (TestSuiteA_KendallTau, TestSuiteB_StatenessStability, TestSuiteC).
+	// This function is for local development use only.
+	t.Run("SuiteA", TestSuiteA_KendallTau)
+	t.Run("SuiteB", TestSuiteB_StatenessStability)
+	t.Run("SuiteC_Concurrent", TestSuiteC_ConcurrentDeterminism)
+	t.Run("SuiteC_PileOn", TestSuiteC_PileOn)
 }
 
 // findRepoRoot walks up from the working directory to find the repo root (contains CLAUDE.md).
