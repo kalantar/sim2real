@@ -396,7 +396,7 @@ func TestEvolvedScorerContract(t *testing.T) {
 		t.Errorf("Category() = %v, want Distribution", scorer.Category())
 	}
 
-	// Score returns 0.5 for each endpoint (PR3 placeholder contract)
+	// Score returns 1.0 for each endpoint (trivialAlgorithm with zero-load mockEndpoint)
 	endpoints := []scheduling.Endpoint{
 		&mockEndpoint{name: "ep-a"},
 		&mockEndpoint{name: "ep-b"},
@@ -411,8 +411,8 @@ func TestEvolvedScorerContract(t *testing.T) {
 			t.Errorf("missing score for endpoint")
 			continue
 		}
-		if score != 0.5 {
-			t.Errorf("score = %f, want 0.5", score)
+		if score != 1.0 {
+			t.Errorf("score = %f, want 1.0", score)
 		}
 	}
 
@@ -423,6 +423,47 @@ func TestEvolvedScorerContract(t *testing.T) {
 	}
 	if len(emptyScores) != 0 {
 		t.Errorf("Score(nil endpoints) returned %d entries, want 0", len(emptyScores))
+	}
+}
+
+func TestEvolvedScorerScoresCorrectly(t *testing.T) {
+	// BC-4: metric translation; BC-5: session header.
+	alg := newEvolvedAlgorithm()
+	scorer := NewEvolvedScorer(alg).WithName("test")
+
+	heavy := &testEndpointForScorer{
+		id: "heavy",
+		metrics: &fwkdl.Metrics{
+			WaitingQueueSize:    5,
+			RunningRequestsSize: 3, // EffectiveLoad=8 → hard penalty (load>7)
+			KVCacheUsagePercent: 50.0,
+		},
+	}
+	light := &testEndpointForScorer{
+		id: "light",
+		metrics: &fwkdl.Metrics{
+			WaitingQueueSize:    0,
+			RunningRequestsSize: 1, // EffectiveLoad=1
+			KVCacheUsagePercent: 30.0,
+		},
+	}
+
+	scores := scorer.Score(context.Background(), nil, nil, []scheduling.Endpoint{heavy, light})
+	if len(scores) != 2 {
+		t.Fatalf("expected 2 scores, got %d", len(scores))
+	}
+	if scores[heavy] >= scores[light] {
+		t.Errorf("expected light > heavy; got heavy=%f light=%f", scores[heavy], scores[light])
+	}
+
+	// BC-5: session header extraction
+	req := &scheduling.LLMRequest{
+		RequestId: "req-sess",
+		Headers:   map[string]string{"x-session-token": "sess-abc"},
+	}
+	scoresWithSess := scorer.Score(context.Background(), nil, req, []scheduling.Endpoint{heavy, light})
+	if len(scoresWithSess) != 2 {
+		t.Fatalf("session request: expected 2 scores, got %d", len(scoresWithSess))
 	}
 }
 
