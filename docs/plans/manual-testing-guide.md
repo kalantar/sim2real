@@ -193,10 +193,15 @@ go test ./tools/harness/... -v
 - `TestKVUtilizationNormalization` — normalization + clamping (cross-PR contract #2)
 - `TestUnknownSignalTypeRejection` — unknown-type signal rejection (cross-PR contract #3)
 - `TestCrossLanguageHashConsistency` — Go hash matches Python extract hash
-- `TestEvolvedScorerContract` — scheduling.Scorer shim returns 0.5, correct category
+- `TestEvolvedScorerContract` — scorer interface contract verified (TypedName, Category, correct type)
 - `TestNewEvolvedScorerNilPanics` — nil Algorithm rejected at construction
 - `TestLoadAlgorithmErrorPaths` — table-driven error path coverage (path traversal, missing fields, etc.)
-- `TestEquivalence` — PR5 placeholder
+- `TestEquivalence` — dispatches Suite B + Suite C
+- `TestEvolvedAlgorithmSingleEndpoint` — single endpoint gets positive score, KV penalty applied
+- `TestEvolvedAlgorithmKVPenaltyBoundary` — equal scores at exactly KV=0.82 (boundary)
+- `TestEvolvedScorerScoresCorrectly` — metric translation correct, evolved algorithm scores returned
+- `TestKendallTau` — rank correlation utility verified
+- `TestMaxAbsDiff` — max absolute difference utility verified
 
 ### 3.6 Cross-language content hash contract
 

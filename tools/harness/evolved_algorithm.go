@@ -29,7 +29,7 @@ type evolvedAlgorithm struct {
 // blockSize=64 matches the default used in inference-sim cluster simulations.
 func newEvolvedAlgorithm() *evolvedAlgorithm {
 	return &evolvedAlgorithm{
-		base: sim.NewRoutingPolicy("weighted", sim.DefaultScorerConfigs(), 64),
+		base: sim.NewRoutingPolicy("weighted", sim.DefaultScorerConfigs(), 64, nil),
 	}
 }
 

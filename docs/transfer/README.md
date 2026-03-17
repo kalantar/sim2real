@@ -65,7 +65,7 @@ PR3 MUST implement and pass these gates before merging:
 
 **Location:** `docs/transfer/scorer_template.go.md`
 **Version:** 1.0
-**Pinned commit:** `091312c333a50e94f5e60a2ca2926e8442eeffa9`
+**Pinned commit:** `b9a4a82e0d9b83ad362e37aa3682672f8c45f331`
 
 The scorer template is an annotated example showing llm-d-inference-scheduler plugin conventions. Stage 3's LLM uses it as the structural reference for generating production scorer code.
 

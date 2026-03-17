@@ -1,8 +1,8 @@
 # BLIS-to-llm-d Signal Mapping Artifact
 
 **Version:** 1.0
-**Target submodule:** llm-d-inference-scheduler (PARTIALLY VERIFIED — Scorer Interface Reference section verified against submodule at commit 091312c, PR2 Task 1. Signal Mapping Table field names VERIFIED in PR3/PR5 against `fwkdl.Metrics` at commit `091312c`.)
-**Pinned commit hash:** 091312c333a50e94f5e60a2ca2926e8442eeffa9 (PR3 MUST initialize the submodule at this commit and verify all claims)
+**Target submodule:** llm-d-inference-scheduler (VERIFIED — Scorer Interface Reference section verified against submodule at commit b9a4a82, PR2 Task 1. Signal Mapping Table field names VERIFIED in PR3/PR5 against `fwkdl.Metrics` at commit `b9a4a82`.)
+**Pinned commit hash:** b9a4a82e0d9b83ad362e37aa3682672f8c45f331
 
 ## Signal Mapping Table
 
@@ -40,7 +40,7 @@
 
 ## Scorer Interface Reference
 
-> **Verified against** llm-d-inference-scheduler at commit `091312c` (2026-03-09) — signatures confirmed indirectly via LoadAware's `var _ scheduling.Scorer = &LoadAware{}` type assertion and matching method signatures.
+> **Verified against** llm-d-inference-scheduler at commit `b9a4a82` (2026-03-17) — signatures confirmed indirectly via LoadAware's `var _ scheduling.Scorer = &LoadAware{}` type assertion and matching method signatures.
 > **Interface source:** The `scheduling.Scorer` interface is defined in the external dependency `sigs.k8s.io/gateway-api-inference-extension v0.0.0-20260128235548-fd30cb97714a`, not in the llm-d-inference-scheduler repository itself. Verification reads LoadAware's implementation of the interface as the ground truth.
 
 Target system: `llm-d-inference-scheduler` (gateway-api-inference-extension framework)

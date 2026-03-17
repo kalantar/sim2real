@@ -1,7 +1,7 @@
 # Scorer Template — llm-d-inference-scheduler Plugin
 
 **Version:** 1.0
-**Pinned commit:** `091312c333a50e94f5e60a2ca2926e8442eeffa9`
+**Pinned commit:** `b9a4a82e0d9b83ad362e37aa3682672f8c45f331`
 **Based on:** `pkg/plugins/scorer/load_aware.go` (LoadAware scorer)
 **Module:** `github.com/llm-d/llm-d-inference-scheduler`
 **Go version:** 1.25.7
@@ -354,7 +354,7 @@ schedulingProfiles:
 
 **Evidence:** The reference implementation (`LoadAware`) implements only `TypedName()`, `Category()`, `Score()`, and `WithName()` — no lifecycle methods. The compile-time assertion `var _ scheduling.Scorer = &EvolvedScorer{}` (Section 2) would produce a compile error if the interface required additional methods.
 
-**Stage 3 implication:** Do NOT implement `Start()` or `Stop()` methods unless the `plugin.Plugin` interface definition at the pinned commit requires them (which it does not at commit `091312c`).
+**Stage 3 implication:** Do NOT implement `Start()` or `Stop()` methods unless the `plugin.Plugin` interface definition at the pinned commit requires them (which it does not at commit `b9a4a82`).
 
 ---
 
