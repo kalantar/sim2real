@@ -360,12 +360,12 @@ def cmd_extract(args: argparse.Namespace) -> int:
             "CI pipelines MUST use --strict to ensure deterministic fidelity checks. "
             "Fix: either pass --strict (recommended), set CI=false, or unset the CI "
             "environment variable if you are running locally. "
-            "Usage: python tools/transfer_cli.py extract --strict routing/"
+            "Usage: python tools/transfer_cli.py extract --strict blis_router/best/"
         ])
 
-    program_py = routing_dir / "best_program.py"
-    if not program_py.exists():
-        return _output("error", 2, errors=[f"best_program.py not found in {routing_dir}"])
+    program_go = routing_dir / "best_program.go"
+    if not program_go.exists():
+        return _output("error", 2, errors=[f"best_program.go not found in {routing_dir}"])
 
     info_json = routing_dir / "best_program_info.json"
     if not info_json.exists():
@@ -374,9 +374,9 @@ def cmd_extract(args: argparse.Namespace) -> int:
     # Size guard
     MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
     try:
-        if program_py.stat().st_size > MAX_FILE_SIZE:
+        if program_go.stat().st_size > MAX_FILE_SIZE:
             return _output("error", 2, errors=[
-                f"best_program.py exceeds {MAX_FILE_SIZE} bytes — refusing to read."])
+                f"best_program.go exceeds {MAX_FILE_SIZE} bytes — refusing to read."])
         if info_json.stat().st_size > MAX_FILE_SIZE:
             return _output("error", 2, errors=[
                 f"best_program_info.json exceeds {MAX_FILE_SIZE} bytes — refusing to read."])
@@ -385,19 +385,19 @@ def cmd_extract(args: argparse.Namespace) -> int:
 
     # Read and parse
     try:
-        source = program_py.read_text()
+        source = program_go.read_text()
     except OSError as e:
-        return _output("error", 2, errors=[f"Failed to read {program_py}: {e}"])
+        return _output("error", 2, errors=[f"Failed to read {program_go}: {e}"])
     block, line_range, block_error = _extract_evolve_block(source)
     if block is None:
         _ERROR_MESSAGES = {
-            "no_markers": "Neither EVOLVE-BLOCK-START nor EVOLVE-BLOCK-END markers found in best_program.py.",
-            "end_without_start": "EVOLVE-BLOCK-END found without EVOLVE-BLOCK-START in best_program.py.",
-            "start_without_end": "EVOLVE-BLOCK-START found but no EVOLVE-BLOCK-END in best_program.py.",
-            "inverted_markers": "EVOLVE-BLOCK-END appears before EVOLVE-BLOCK-START in best_program.py (inverted markers).",
+            "no_markers": "Neither EVOLVE-BLOCK-START nor EVOLVE-BLOCK-END markers found in best_program.go.",
+            "end_without_start": "EVOLVE-BLOCK-END found without EVOLVE-BLOCK-START in best_program.go.",
+            "start_without_end": "EVOLVE-BLOCK-START found but no EVOLVE-BLOCK-END in best_program.go.",
+            "inverted_markers": "EVOLVE-BLOCK-END appears before EVOLVE-BLOCK-START in best_program.go (inverted markers).",
         }
         error_msg = _ERROR_MESSAGES.get(block_error,
-            "EVOLVE-BLOCK markers not found or malformed in best_program.py.")
+            "EVOLVE-BLOCK markers not found or malformed in best_program.go.")
         return _output("error", 2, errors=[error_msg], error_detail=block_error)
 
     # Extract signals
@@ -479,7 +479,7 @@ def cmd_extract(args: argparse.Namespace) -> int:
     composites = []
     for method, fields in METHOD_EXPANSIONS.items():
         found_constituents = [f for f in fields if any(s["name"] == f for s in signals)]
-        if found_constituents:
+        if found_constituents and re.search(r'\.' + re.escape(method) + r'\(\)', block):
             composites.append({
                 "name": method,
                 "constituents": found_constituents,
@@ -491,7 +491,7 @@ def cmd_extract(args: argparse.Namespace) -> int:
 
     summary = {
         "algorithm_name": "blis_weighted_scoring",
-        "evolve_block_source": f"{_relative_source_path(routing_dir)}best_program.py:{line_range}",
+        "evolve_block_source": f"{_relative_source_path(routing_dir)}best_program.go:{line_range}",
         "evolve_block_content_hash": block_hash,
         "signals": signals,
         "composite_signals": composites,

@@ -9,12 +9,12 @@
     "algorithm_name": {"type": "string"},
     "evolve_block_source": {
       "type": "string",
-      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\./)(?!.*(?:^|/)\\./).+\\.py:\\d+-\\d+$",
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\./)(?!.*(?:^|/)\\./).+\\.[a-zA-Z]+:\\d+-\\d+$",
       "description": "Source file path and line range, e.g., 'routing/best_program.py:171-242'. Typically relative to the repository root; may be absolute when the routing directory is outside the repo. The pattern rejects '../' and './' path components. NOTE: The regex pattern validates format only (two digit sequences separated by a dash). It does NOT enforce start <= end on line-range values — JSON Schema regex cannot perform numeric comparisons. Consumers MUST validate start <= end programmatically if required. IMPORTANT: The .py source file contains Go code embedded in a Python triple-quoted string literal (GO_ROUTING_CODE = '\"\"\"...\"\"\"'). PR3 must parse the Python file to extract the embedded Go — do NOT treat the .py file as standalone Go source."
     },
     "evolve_block_content_hash": {
       "type": "string",
-      "description": "SHA-256 hex digest of the EVOLVE-BLOCK content at extraction time. Hash is computed over the raw Python file lines from EVOLVE-BLOCK-START through EVOLVE-BLOCK-END inclusive, including the marker lines themselves, without stripping embedded language markers. PR3 MUST recompute this hash over the same line range and compare before parsing — if it differs, the source changed since extraction and the signal list may be stale.",
+      "description": "SHA-256 hex digest of the EVOLVE-BLOCK content at extraction time. Hash is computed over the raw source file lines from EVOLVE-BLOCK-START through EVOLVE-BLOCK-END inclusive, including the marker lines themselves, without stripping embedded language markers. PR3 MUST recompute this hash over the same line range and compare before parsing — if it differs, the source changed since extraction and the signal list may be stale.",
       "pattern": "^[0-9a-f]{64}$"
     },
     "signals": {
