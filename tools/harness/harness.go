@@ -70,7 +70,7 @@ func LoadAlgorithm(summaryPath, repoRoot string) (Algorithm, error) {
 		return nil, fmt.Errorf("algorithm_summary.json missing required field 'evolve_block_source'")
 	}
 
-	// Parse source path and line range (format: "path/to/file.py:START-END")
+	// Parse source path and line range (format: "path/to/file.go:START-END")
 	parts := strings.SplitN(summary.EvolveBlockSource, ":", 2)
 	if len(parts) != 2 {
 		return nil, fmt.Errorf("invalid evolve_block_source format: %q", summary.EvolveBlockSource)
