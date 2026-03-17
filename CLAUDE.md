@@ -67,7 +67,7 @@ The `extract` command produces **two** JSON outputs:
 
 **Artifact existence on failure:** The `extract` command has three distinct exit-code-1 failure modes with different artifact postconditions:
 - **Fidelity failure** (low-fidelity signal detected): Exits **before** writing the artifact file. `workspace/algorithm_summary.json` will **not exist** on disk.
-- **Strict-mode minimum-signal failure** (`--strict` with fewer than 3 signals): Exits **before** writing the artifact file. `workspace/algorithm_summary.json` will **not exist** on disk.
+- **Strict-mode minimum-signal failure** (`--strict` with fewer than 2 signals): Exits **before** writing the artifact file. `workspace/algorithm_summary.json` will **not exist** on disk.
 - **Scope failure** (out-of-scope pattern detected): Exits **after** writing the artifact file. `workspace/algorithm_summary.json` **will exist** on disk (with `scope_validation_passed: false`).
 
 Downstream stages MUST use the exit code (not file existence) as the success signal. A stale artifact from a prior successful run may remain on disk after any pre-write failure (fidelity failure or strict-mode minimum-signal failure).
