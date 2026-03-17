@@ -139,14 +139,14 @@ Record: deterministic (true if TestSuiteC_ConcurrentDeterminism passes), max_pil
 **Prerequisite check:** Verify workload YAML files exist before classification:
 
 ```bash
-ls routing/workload_v2_*.yaml
+ls blis_router/workloads/*.yaml
 ```
 
-**HALT if no files match the glob.** Message: "HALT: No routing/workload_v2_*.yaml files found — cannot classify workloads as matched/unmatched. Ensure routing artifacts are present." Without these files, the LLM has no data to perform workload classification and would fabricate assignments.
+**HALT if no files match the glob.** Message: "HALT: No blis_router/workloads/*.yaml files found — cannot classify workloads as matched/unmatched. Ensure blis_router artifacts are present." Without these files, the LLM has no data to perform workload classification and would fabricate assignments.
 
 For each benchmark workload, classify as **matched** or **unmatched** using this rule:
 
-> A workload is **matched** if the signals exercised by the workload (per `routing/workload_v2_*.yaml` parameter ranges) overlap with at least one signal listed in `workspace/signal_coverage.json` `signals[]` that has `mapped == true` (equivalently, `prod_name` is non-null). A workload is **unmatched** if none of its exercised signals are mapped.
+> A workload is **matched** if the signals exercised by the workload (per `blis_router/workloads/*.yaml` parameter ranges) overlap with at least one signal listed in `workspace/signal_coverage.json` `signals[]` that has `mapped == true` (equivalently, `prod_name` is non-null). A workload is **unmatched** if none of its exercised signals are mapped.
 >
 > **Concrete check:** For each workload YAML, identify which sim parameters vary using the YAML-field-to-signal mapping below. If any of those signals appear in `signal_coverage.json` `signals[]` with `mapped: true` (i.e., `prod_name` is non-null), the workload is matched. Otherwise unmatched.
 >
