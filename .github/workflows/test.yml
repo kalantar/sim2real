@@ -46,7 +46,7 @@ jobs:
 
       - name: Verify extract --strict
         if: success()
-        run: python tools/transfer_cli.py extract --strict routing/
+        run: python tools/transfer_cli.py extract --strict blis_router/best/
 
       - name: Verify mapping
         if: success()
