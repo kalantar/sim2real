@@ -72,11 +72,11 @@ plugin.Register(scorer.LoadAwareType, scorer.LoadAwareFactory)
 
 **Existing scorers (VERIFIED):** LoadAware, ActiveRequest, SessionAffinity, PrecisePrefixCache, NoHitLRU
 
-**Metric access (PARTIALLY VERIFIED):**
+**Metric access (VERIFIED):**
 - `endpoint.GetMetrics().WaitingQueueSize` — **VERIFIED** (load_aware.go:87)
 - `endpoint.GetMetrics().RunningRequestsSize` — **VERIFIED** (CORRECTED in PR5: previously documented as RunningQueueSize, which does not exist; RunningRequestsSize is the actual field in fwkdl.Metrics)
 - ~~`endpoint.GetMetrics().RunningRequestCount`~~ — **DOES NOT EXIST** (CORRECTED in PR5: previously documented as RunningRequestCount; RunningRequestsSize is the actual field; both BatchSize and InFlightRequests map to RunningRequestsSize)
-- `endpoint.GetMetrics().KVCacheUsagePercent` — **VERIFIED** (PR5: blis_weighted.go reads `m.KVCacheUsagePercent` at line 108 in the scorer added at pinned commit c4c1100)
+- `endpoint.GetMetrics().KVCacheUsagePercent` — **VERIFIED** (fwkdl.Metrics struct field at `sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/datalayer/metrics.go:33`, confirmed present at submodule pin b9a4a82)
 
 **Config:** YAML-based with scorer name, type, weight, and optional parameters (JSON blob parsed by factory).
 
