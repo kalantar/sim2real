@@ -16,8 +16,8 @@ EVOLVE-BLOCK location, and content hash.
 Verify all required input files exist before proceeding. **HALT if any check fails.**
 
 ```bash
-test -f routing/best_program.py || { echo "HALT: missing routing/best_program.py"; exit 1; }
-test -f routing/best_program_info.json || { echo "HALT: missing routing/best_program_info.json"; exit 1; }
+test -f blis_router/best/best_program.go || { echo "HALT: missing blis_router/best/best_program.go"; exit 1; }
+test -f blis_router/best/best_program_info.json || { echo "HALT: missing blis_router/best/best_program_info.json"; exit 1; }
 ```
 
 ## Stale Artifact Guard
@@ -35,7 +35,7 @@ rm -f workspace/algorithm_summary.json
 mkdir -p workspace
 # Use --strict in CI environments (enforces minimum signal count).
 # transfer_cli.py auto-detects CI via the CI env var and will fail without --strict.
-.venv/bin/python tools/transfer_cli.py extract ${CI:+--strict} routing/
+.venv/bin/python tools/transfer_cli.py extract ${CI:+--strict} blis_router/best/
 ```
 
 **Exit code handling:**
@@ -106,7 +106,7 @@ print('Content hash:', d.get('evolve_block_content_hash'))
 
 - `workspace/algorithm_summary.json` — contains:
   - `algorithm_name`: string
-  - `evolve_block_source`: path with line range (e.g., `routing/best_program.py:171-242`)
+  - `evolve_block_source`: path with line range (e.g., `blis_router/best/best_program.go:177-258`)
   - `evolve_block_content_hash`: SHA-256 hex string
   - `signals[]`: array of signal objects with name, type, access_path, normalization_note
   - `composite_signals[]`: array of composite signal definitions

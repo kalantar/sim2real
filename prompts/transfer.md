@@ -14,7 +14,7 @@ Stages 1 through 6, verifying prerequisite artifacts between each stage.
 
 | Stage | Name      | Prompt File           | Input Artifacts                              | Output Artifacts                   |
 |-------|-----------|-----------------------|----------------------------------------------|------------------------------------|
-| 1     | Extract   | `prompts/extract.md`  | `routing/best_program.py`, `routing/best_program_info.json` | `workspace/algorithm_summary.json` |
+| 1     | Extract   | `prompts/extract.md`  | `blis_router/best/best_program.go`, `blis_router/best/best_program_info.json` | `workspace/algorithm_summary.json` |
 | 2     | Translate | `prompts/translate.md`| `workspace/algorithm_summary.json`, `docs/transfer/blis_to_llmd_mapping.md` | `workspace/signal_coverage.json` |
 | 3     | Generate  | `prompts/generate.md` | `workspace/algorithm_summary.json`, `workspace/signal_coverage.json`, `docs/transfer/scorer_template.go.md` | scorer files + `workspace/stage3_output.json` |
 | 4     | Test      | `prompts/test.md`     | `workspace/stage3_output.json`               | build + test pass (no artifact)    |
@@ -30,8 +30,8 @@ Before starting the pipeline, verify all required artifacts and submodules exist
 # Verify required artifacts
 test -f docs/transfer/blis_to_llmd_mapping.md || { echo "HALT: missing mapping artifact"; exit 1; }
 test -f docs/transfer/scorer_template.go.md || { echo "HALT: missing scorer template"; exit 1; }
-test -f routing/best_program.py || { echo "HALT: missing routing input best_program.py"; exit 1; }
-test -f routing/best_program_info.json || { echo "HALT: missing routing input best_program_info.json"; exit 1; }
+test -f blis_router/best/best_program.go || { echo "HALT: missing blis_router/best/best_program.go"; exit 1; }
+test -f blis_router/best/best_program_info.json || { echo "HALT: missing blis_router/best/best_program_info.json"; exit 1; }
 
 # Verify submodules initialized
 test -d inference-sim/sim || { echo "HALT: inference-sim submodule not initialized — run git submodule update --init inference-sim"; exit 1; }

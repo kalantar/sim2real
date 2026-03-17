@@ -96,6 +96,8 @@ For each signal with `type: "unknown"`:
 
 ## Step 4: F-10 Double-Counting Detection (Cross-PR Contract #4)
 
+**Skip this step entirely if `composite_signals` in `workspace/algorithm_summary.json` is empty.** An empty `composite_signals: []` means the EVOLVE-BLOCK contains no composite method calls (e.g., no `EffectiveLoad()`), so there is no composite to check for double-counting. For the current blis_router EVOLVE-BLOCK, `composite_signals: []` — proceed directly to Step 5.
+
 Check if two signals map to the same production metric:
 
 - If `InFlightRequests` falls back to `RunningQueueSize`, then EffectiveLoad becomes `WaitingQueueSize + 2*RunningQueueSize` — double-counting that metric.

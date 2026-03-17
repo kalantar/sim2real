@@ -90,7 +90,7 @@ Parse the EVOLVE-BLOCK and generate production scorer code:
 
 ### 3a: Parse Scoring Logic
 
-Read the EVOLVE-BLOCK from `routing/best_program.py` and identify:
+Read the EVOLVE-BLOCK from `blis_router/best/best_program.go` and identify:
 - Scoring weights applied to each signal
 - Penalty functions (e.g., cubic load penalty, KV pressure penalty)
 - Decision thresholds (e.g., score cutoffs, load thresholds)
