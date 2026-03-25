@@ -16,6 +16,7 @@ Run stages using prompt templates in `prompts/`. Use `prompts/transfer.md` as th
 | 1 Extract | `prompts/extract.md` | `workspace/algorithm_summary.json` |
 | 2 Translate | `prompts/translate.md` | `workspace/signal_coverage.json` |
 | 3 Generate | `prompts/generate.md` | Go scorer plugin source |
+| 3.5 Validate Translation | `prompts/validate-translation.md` | `workspace/translation_validation.json` |
 | 4 Test | `prompts/test.md` | Build + test pass |
 | 4.5 Build & Push | `prompts/build-push.md` | Treatment EPP image in registry |
 | 5 Validate | `prompts/validate.md` | `workspace/validation_results.json` |
