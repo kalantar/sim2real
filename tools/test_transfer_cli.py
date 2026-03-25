@@ -2691,6 +2691,29 @@ class TestMergeValues:
             f"Expected deep-merged a dict, got: {result.get('a')}"
         )
 
+    def test_pipeline_key_stripped_from_output(self, tmp_path):
+        """MV-pipeline: pipeline.fast_iteration in env_defaults must not appear in values.yaml."""
+        env_file = tmp_path / "env.yaml"
+        alg_file = tmp_path / "alg.yaml"
+        out_file = tmp_path / "out.yaml"
+
+        env = self._minimal_env_defaults()
+        env["pipeline"] = {"fast_iteration": True}
+        self._write_yaml(env_file, env)
+        self._write_yaml(alg_file, self._minimal_algorithm_values())
+
+        rc, out, err = _run_cli(
+            "merge-values",
+            "--env", str(env_file),
+            "--algorithm", str(alg_file),
+            "--out", str(out_file),
+        )
+        assert rc == 0, f"exit {rc}: {err}"
+        result = self._load_yaml(out_file)
+        assert "pipeline" not in result, (
+            f"'pipeline' key must not appear in merged values.yaml, got keys: {list(result)}"
+        )
+
     def test_list_replacement(self, tmp_path):
         """List in overlay replaces list in base entirely (not appended)."""
         env_file = tmp_path / "env.yaml"
@@ -3573,3 +3596,104 @@ class TestAppendCalibrationLog:
         )
         assert rc == 0, f"exit {rc}: {err}"
         assert "INCONCLUSIVE" in cal.read_text()
+
+
+class TestCompare:
+    """Tests for the compare subcommand."""
+
+    def _write_results(self, path: Path, workloads: list) -> None:
+        path.write_text(json.dumps({"workloads": workloads}))
+
+    def _workload(self, name: str, ttft_p50=100.0, ttft_p99=200.0,
+                  tpot_p50=30.0, tpot_p99=50.0) -> dict:
+        return {
+            "name": name,
+            "metrics": {
+                "ttft_p50": ttft_p50, "ttft_p99": ttft_p99,
+                "tpot_p50": tpot_p50, "tpot_p99": tpot_p99,
+            }
+        }
+
+    def test_happy_path_single_workload(self, tmp_path):
+        """CMP-1: single matched workload produces table, exit 0."""
+        b = tmp_path / "baseline.json"
+        t = tmp_path / "treatment.json"
+        self._write_results(b, [self._workload("wl1", ttft_p50=100.0)])
+        self._write_results(t, [self._workload("wl1", ttft_p50=90.0)])
+        rc, out, err = _run_cli("compare", "--baseline", str(b), "--treatment", str(t))
+        assert rc == 0, f"exit {rc}: {err}"
+        assert "wl1" in out
+        assert "TTFT p50" in out
+        assert "better" in out  # 90 < 100
+
+    def test_happy_path_writes_out_file(self, tmp_path):
+        """CMP-2: --out writes comparison table to file."""
+        b = tmp_path / "baseline.json"
+        t = tmp_path / "treatment.json"
+        out_file = tmp_path / "table.txt"
+        self._write_results(b, [self._workload("wl1")])
+        self._write_results(t, [self._workload("wl1", ttft_p50=110.0)])
+        rc, out, err = _run_cli("compare", "--baseline", str(b), "--treatment", str(t),
+                                "--out", str(out_file))
+        assert rc == 0, f"exit {rc}: {err}"
+        assert out_file.exists()
+        assert "TTFT p50" in out_file.read_text()
+
+    def test_worse_label_when_treatment_higher(self, tmp_path):
+        """CMP-3: positive delta (higher latency) labelled 'worse'."""
+        b = tmp_path / "baseline.json"
+        t = tmp_path / "treatment.json"
+        self._write_results(b, [self._workload("wl1", ttft_p50=100.0)])
+        self._write_results(t, [self._workload("wl1", ttft_p50=120.0)])
+        rc, out, err = _run_cli("compare", "--baseline", str(b), "--treatment", str(t))
+        assert rc == 0, f"exit {rc}: {err}"
+        assert "worse" in out
+
+    def test_partial_mismatch_warns_and_exits_0(self, tmp_path):
+        """CMP-4: partial workload mismatch — matched workloads shown, WARN for unmatched, exit 0."""
+        b = tmp_path / "baseline.json"
+        t = tmp_path / "treatment.json"
+        self._write_results(b, [self._workload("wl1"), self._workload("wl2")])
+        self._write_results(t, [self._workload("wl1"), self._workload("wl3")])
+        rc, out, err = _run_cli("compare", "--baseline", str(b), "--treatment", str(t))
+        assert rc == 0, f"exit {rc}: {err}"
+        assert "wl1" in out
+        assert "WARN" in err
+        assert "wl2" in err or "wl3" in err
+
+    def test_no_paired_workloads_exits_1(self, tmp_path):
+        """CMP-5: no workloads can be paired — exit 1."""
+        b = tmp_path / "baseline.json"
+        t = tmp_path / "treatment.json"
+        self._write_results(b, [self._workload("wl_a")])
+        self._write_results(t, [self._workload("wl_b")])
+        rc, out, err = _run_cli("compare", "--baseline", str(b), "--treatment", str(t))
+        assert rc == 1, f"expected exit 1, got {rc}"
+
+    def test_missing_baseline_exits_1(self, tmp_path):
+        """CMP-6: missing baseline file — exit 1."""
+        t = tmp_path / "treatment.json"
+        self._write_results(t, [self._workload("wl1")])
+        rc, out, err = _run_cli("compare",
+                                "--baseline", str(tmp_path / "nope.json"),
+                                "--treatment", str(t))
+        assert rc == 1, f"expected exit 1, got {rc}"
+
+    def test_malformed_treatment_exits_1(self, tmp_path):
+        """CMP-7: malformed treatment JSON — exit 1."""
+        b = tmp_path / "baseline.json"
+        t = tmp_path / "treatment.json"
+        self._write_results(b, [self._workload("wl1")])
+        t.write_text("not json {{{")
+        rc, out, err = _run_cli("compare", "--baseline", str(b), "--treatment", str(t))
+        assert rc == 1, f"expected exit 1, got {rc}"
+
+    def test_multiple_workloads_produces_sections(self, tmp_path):
+        """CMP-8: multiple workloads produce one section each."""
+        b = tmp_path / "baseline.json"
+        t = tmp_path / "treatment.json"
+        self._write_results(b, [self._workload("wl1"), self._workload("wl2")])
+        self._write_results(t, [self._workload("wl1"), self._workload("wl2")])
+        rc, out, err = _run_cli("compare", "--baseline", str(b), "--treatment", str(t))
+        assert rc == 0, f"exit {rc}: {err}"
+        assert out.count("=== Workload:") == 2

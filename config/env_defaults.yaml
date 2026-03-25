@@ -107,3 +107,7 @@ stack:
 
 observe:
   noise_runs: 5
+
+pipeline:
+  fast_iteration: true   # Skip cluster benchmarks (Stage 5) and PR creation (Stage 6).
+                         # Set to false when algorithm is ready for full validation.

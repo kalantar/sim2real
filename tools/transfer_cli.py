@@ -1892,6 +1892,9 @@ def cmd_merge_values(args: "argparse.Namespace") -> int:
         print(f"ERROR: failed to parse --algorithm file '{alg_path}': {e}", file=sys.stderr)
         return 2
 
+    # Strip pipeline config — not consumed by Tekton templates
+    env_data.pop("pipeline", None)
+
     # Deep-merge: algorithm_values overlays env_defaults
     merged = _deep_merge(env_data, alg_data)
 
@@ -2332,6 +2335,87 @@ def cmd_append_calibration_log(args: "argparse.Namespace") -> int:
     return 0
 
 
+def cmd_compare(args: "argparse.Namespace") -> int:
+    """Print a latency comparison table from baseline and treatment result files.
+
+    Exit 0 = table produced (even with partial workload matches).
+    Exit 1 = no workloads could be paired, or input files missing/malformed.
+    """
+    import json as _json
+
+    def _load(path: str, label: str):
+        p = Path(path)
+        if not p.exists():
+            print(f"ERROR: {label} file '{path}' not found.", file=sys.stderr)
+            return None
+        try:
+            data = _json.loads(p.read_text())
+        except _json.JSONDecodeError as e:
+            print(f"ERROR: failed to parse {label} file '{path}': {e}", file=sys.stderr)
+            return None
+        if "workloads" not in data or not isinstance(data["workloads"], list):
+            print(f"ERROR: {label} file '{path}' missing 'workloads' list.", file=sys.stderr)
+            return None
+        return {w["name"]: w["metrics"] for w in data["workloads"] if "name" in w and "metrics" in w}
+
+    baseline = _load(args.baseline, "--baseline")
+    treatment = _load(args.treatment, "--treatment")
+    if baseline is None or treatment is None:
+        return 1
+
+    METRICS = [
+        ("ttft_p50", "TTFT p50"),
+        ("ttft_p99", "TTFT p99"),
+        ("tpot_p50", "TPOT p50"),
+        ("tpot_p99", "TPOT p99"),
+    ]
+
+    all_names = sorted(set(baseline) | set(treatment))
+    paired = [(n, baseline[n], treatment[n]) for n in all_names
+              if n in baseline and n in treatment]
+    for n in all_names:
+        if n in baseline and n not in treatment:
+            print(f"WARN: workload '{n}' missing in --treatment file — skipped", file=sys.stderr)
+        elif n in treatment and n not in baseline:
+            print(f"WARN: workload '{n}' missing in --baseline file — skipped", file=sys.stderr)
+
+    if not paired:
+        print("ERROR: no workloads could be paired between baseline and treatment files.",
+              file=sys.stderr)
+        return 1
+
+    lines = []
+    for wname, b_metrics, t_metrics in paired:
+        lines.append(f"=== Workload: {wname} ===")
+        header = f"{'Metric':<12}{'Baseline':>10}{'Treatment':>11}{'Delta(ms)':>11}{'Change':>14}"
+        sep = "─" * len(header)
+        lines.append(header)
+        lines.append(sep)
+        for key, label in METRICS:
+            bval = b_metrics.get(key)
+            tval = t_metrics.get(key)
+            if bval is None or tval is None:
+                lines.append(f"{label:<12}{'N/A':>10}{'N/A':>11}{'N/A':>11}{'N/A':>14}")
+                continue
+            delta = tval - bval
+            pct = (delta / bval * 100) if bval != 0 else 0.0
+            direction = "better" if delta < 0 else ("worse" if delta > 0 else "no change")
+            delta_str = f"{delta:+.1f}"
+            pct_str = f"{pct:+.1f}% ({direction})"
+            lines.append(f"{label:<12}{bval:>10.1f}{tval:>11.1f}{delta_str:>11}{pct_str:>14}")
+        lines.append("")
+
+    output = "\n".join(lines)
+    print(output)
+
+    if args.out:
+        out_path = Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(output + "\n")
+
+    return 0
+
+
 def main():
     if sys.version_info < (3, 10):
         print("ERROR: transfer_cli.py requires Python >= 3.10 "
@@ -2443,6 +2527,15 @@ def main():
     p_acl.add_argument("--calibration-log", default="docs/transfer/calibration_log.md",
                        help="Path to calibration log")
     p_acl.set_defaults(func=cmd_append_calibration_log)
+
+    p_cmp = subparsers.add_parser("compare",
+        help="Print latency comparison table from baseline/treatment results")
+    p_cmp.add_argument("--baseline", required=True,
+                       help="Path to workspace/baseline_results.json")
+    p_cmp.add_argument("--treatment", required=True,
+                       help="Path to workspace/treatment_results.json")
+    p_cmp.add_argument("--out", help="Output file for comparison table (optional)")
+    p_cmp.set_defaults(func=cmd_compare)
 
     p_mv = subparsers.add_parser("merge-values",
         help="Merge env_defaults.yaml and algorithm_values.yaml into values.yaml")

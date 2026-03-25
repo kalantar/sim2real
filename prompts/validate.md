@@ -9,6 +9,7 @@ inputs:
   - (Stage 4 success verified via go build/go vet — no workspace artifact)
 outputs:
   - workspace/validation_results.json
+  - workspace/comparison_table.txt (full mode only)
 ---
 
 # Stage 5: Validate
@@ -45,6 +46,37 @@ test -f workspace/algorithm_summary.json || { echo "HALT: workspace/algorithm_su
 ```
 
 **HALT if `workspace/algorithm_summary.json` is absent or invalid.** Without it, Suite A silently skips (exits 0/PASS) without running any equivalence checks — this would bypass the go/no-go gate.
+
+## Fast-Iteration Check
+
+Read the fast-iteration flag from `config/env_defaults.yaml`:
+
+```bash
+FAST_ITER=$(.venv/bin/python -c "
+import yaml
+d = yaml.safe_load(open('config/env_defaults.yaml'))
+val = d.get('pipeline', {}).get('fast_iteration', True)
+print('true' if val else 'false')
+")
+```
+
+**If `FAST_ITER` is `"true"`:**
+
+> All prerequisite checks above have already run and passed. Suites A/B/C still run in fast mode.
+
+1. Print: `"FAST MODE: Skipping noise gate and cluster benchmarks (pipeline.fast_iteration=true)"`
+2. Skip Step 1 (Noise Characterization Gate) entirely — jump directly to Step 2 (Suite A).
+3. Complete Steps 2, 3, and 4 (Suites A, B, C) as normal.
+4. Write `workspace/validation_results.json` per Step 4b, adding an `overall_verdict` field:
+   - `"PASS"` if `suite_a.passed` is true AND `suite_c.passed` is true
+   - `"FAIL"` otherwise
+   - Do not schema-validate this file (it intentionally omits `benchmark`, `noise_cv`).
+5. Print: `"FAST MODE: Cluster benchmarks skipped. Set pipeline.fast_iteration=false to run full validation."`
+6. **Exit 0.** Do not proceed to Step 5 or beyond.
+
+**If `FAST_ITER` is `"false"`:** proceed with Step 1 (Noise Characterization Gate) and the full pipeline as today.
+
+> **Stale artifact note:** Fast mode overwrites any prior `validation_results.json` with a partial file. If you flip `fast_iteration` to `false`, you must re-run Stage 5 from Step 1 before proceeding to Stage 6. Proceeding directly to Stage 6 will fail at its prerequisite schema check — this is the expected enforcement gate.
 
 ## Step 1: Noise Characterization Gate
 
@@ -497,6 +529,19 @@ EOF
 ~~~
 
 **HALT if exit 1.**
+
+### 5e. Benchmark comparison table
+
+```bash
+.venv/bin/python tools/transfer_cli.py compare \
+  --baseline workspace/baseline_results.json \
+  --treatment workspace/treatment_results.json \
+  --out workspace/comparison_table.txt
+```
+
+**HALT if exit non-zero.**
+
+The table is printed to stdout and written to `workspace/comparison_table.txt`. Stdout output is human feedback only — not pipeline-consumable.
 
 ## Step 6: Final artifact validation
 
