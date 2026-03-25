@@ -1893,11 +1893,15 @@ def cmd_merge_values(args: "argparse.Namespace") -> int:
         print(f"ERROR: failed to parse --algorithm file '{alg_path}': {e}", file=sys.stderr)
         return 2
 
-    # Strip pipeline config — not consumed by Tekton templates
-    env_data.pop("pipeline", None)
-
     # Deep-merge: algorithm_values overlays env_defaults
     merged = _deep_merge(env_data, alg_data)
+
+    # Strip pipeline config from merged output — not consumed by Tekton templates.
+    # Stripping after merge (not just env_data) ensures the key is absent regardless
+    # of which input file contains it. Only env_data carries this key in practice;
+    # algorithm_values pipeline keys (unusual) also pass through _deep_merge and are
+    # removed here.
+    merged.pop("pipeline", None)
 
     # Flatten gaie.shared into each phase, then remove gaie.shared
     merged = _flatten_gaie_shared(merged)
@@ -2395,7 +2399,7 @@ def cmd_compare(args: "argparse.Namespace") -> int:
     lines = []
     for wname, b_metrics, t_metrics in paired:
         lines.append(f"=== Workload: {wname} ===")
-        header = f"{'Metric':<12}{'Baseline':>10}{'Treatment':>11}{'Delta(ms)':>11}{'Change':>14}"
+        header = f"{'Metric':<12}{'Baseline':>10}{'Treatment':>11}{'Delta(ms)':>11}{'Change':>20}"
         sep = "─" * len(header)
         lines.append(header)
         lines.append(sep)
@@ -2403,21 +2407,31 @@ def cmd_compare(args: "argparse.Namespace") -> int:
             bval = b_metrics.get(key)
             tval = t_metrics.get(key)
             if bval is None or tval is None:
+                missing_side = "--baseline" if bval is None else "--treatment"
+                print(f"WARN: workload '{wname}' metric '{key}' missing in {missing_side} — N/A",
+                      file=sys.stderr)
                 lines.append(f"{label:<12}{'N/A':>10}{'N/A':>11}{'N/A':>11}{'N/A':>14}")
                 continue
             try:
                 delta = tval - bval
                 if bval != 0:
                     pct_str_val = f"{delta / bval * 100:+.1f}%"
+                    direction = "better" if delta < 0 else ("worse" if delta > 0 else "no change")
                 else:
                     pct_str_val = "N/A"
+                    direction = "N/A"
             except TypeError:
+                print(
+                    f"WARN: workload '{wname}' metric '{key}': non-numeric values "
+                    f"(baseline={type(bval).__name__}:{bval!r}, "
+                    f"treatment={type(tval).__name__}:{tval!r}) — skipped",
+                    file=sys.stderr,
+                )
                 lines.append(f"{label:<12}{'N/A':>10}{'N/A':>11}{'N/A':>11}{'N/A':>14}")
                 continue
-            direction = "better" if delta < 0 else ("worse" if delta > 0 else "no change")
             delta_str = f"{delta:+.1f}"
             pct_str = f"{pct_str_val} ({direction})"
-            lines.append(f"{label:<12}{bval:>10.1f}{tval:>11.1f}{delta_str:>11}{pct_str:>14}")
+            lines.append(f"{label:<12}{bval:>10.1f}{tval:>11.1f}{delta_str:>11}{pct_str:>20}")
         lines.append("")
 
     output = "\n".join(lines)

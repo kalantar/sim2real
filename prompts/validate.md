@@ -53,11 +53,18 @@ Read the fast-iteration flag from `config/env_defaults.yaml`:
 
 ```bash
 FAST_ITER=$(.venv/bin/python -c "
-import yaml
-d = yaml.safe_load(open('config/env_defaults.yaml'))
+import sys, yaml
+try:
+    d = yaml.safe_load(open('config/env_defaults.yaml'))
+except Exception as e:
+    print(f'ERROR: cannot read config/env_defaults.yaml: {e}', file=sys.stderr)
+    sys.exit(2)
 val = d.get('pipeline', {}).get('fast_iteration', True)
+if not isinstance(val, bool):
+    print(f'ERROR: pipeline.fast_iteration must be a boolean, got {type(val).__name__}: {val!r}', file=sys.stderr)
+    sys.exit(2)
 print('true' if val else 'false')
-")
+") || { echo "HALT: failed to read pipeline.fast_iteration from config/env_defaults.yaml"; exit 2; }
 ```
 
 **If `FAST_ITER` is `"true"`:**
@@ -70,6 +77,7 @@ print('true' if val else 'false')
 4. Write `workspace/validation_results.json` per Step 4b, adding an `overall_verdict` field:
    - `"PASS"` if `suite_a.passed` is true AND `suite_c.passed` is true
    - `"FAIL"` otherwise
+   - Suite B is informational-only (v1) and does not affect `overall_verdict`.
    - Do not schema-validate this file (it intentionally omits `benchmark`, `noise_cv`).
 5. Print: `"FAST MODE: Cluster benchmarks skipped. Set pipeline.fast_iteration=false to run full validation."`
 6. **Exit 0.** Do not proceed to Step 5 or beyond.

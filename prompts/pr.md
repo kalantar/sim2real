@@ -22,11 +22,18 @@ creates PRs in the llm-d target repositories and records a calibration log entry
 
 ```bash
 FAST_ITER=$(.venv/bin/python -c "
-import yaml
-d = yaml.safe_load(open('config/env_defaults.yaml'))
+import sys, yaml
+try:
+    d = yaml.safe_load(open('config/env_defaults.yaml'))
+except Exception as e:
+    print(f'ERROR: cannot read config/env_defaults.yaml: {e}', file=sys.stderr)
+    sys.exit(2)
 val = d.get('pipeline', {}).get('fast_iteration', True)
+if not isinstance(val, bool):
+    print(f'ERROR: pipeline.fast_iteration must be a boolean, got {type(val).__name__}: {val!r}', file=sys.stderr)
+    sys.exit(2)
 print('true' if val else 'false')
-")
+") || { echo "HALT: failed to read pipeline.fast_iteration from config/env_defaults.yaml"; exit 2; }
 
 if [ "$FAST_ITER" = "true" ]; then
   echo "FAST MODE: PR creation skipped (pipeline.fast_iteration=true)."

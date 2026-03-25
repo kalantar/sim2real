@@ -2717,10 +2717,10 @@ class TestMergeValues:
         # Other env_defaults keys still pass through
         assert "stack" in result, "env_defaults 'stack' key must still be present in output"
 
-    def test_pipeline_key_in_algorithm_values_passes_through(self, tmp_path):
-        """MV-pipeline-alg: pipeline key in algorithm_values is NOT stripped (only env_defaults is stripped).
-        Documents current behaviour: algorithm_values should never contain 'pipeline' in practice,
-        but if it does it will appear in values.yaml. This is a design choice, not a bug."""
+    def test_pipeline_key_in_algorithm_values_also_stripped(self, tmp_path):
+        """MV-pipeline-alg: pipeline key in algorithm_values is also stripped from merged output.
+        The strip runs after _deep_merge, so it removes the key regardless of which input file
+        contains it. algorithm_values should never contain 'pipeline' in practice."""
         env_file = tmp_path / "env.yaml"
         alg_file = tmp_path / "alg.yaml"
         out_file = tmp_path / "out.yaml"
@@ -2738,10 +2738,10 @@ class TestMergeValues:
         )
         assert rc == 0, f"exit {rc}: {err}"
         result = self._load_yaml(out_file)
-        # By design: only env_data is stripped. alg_data pipeline key survives.
-        assert "pipeline" in result, (
-            "pipeline key from algorithm_values currently passes through (by design — "
-            "algorithm_values should never contain this key in practice)"
+        # pipeline is stripped from merged output regardless of source input file
+        assert "pipeline" not in result, (
+            "pipeline key must be absent from values.yaml — stripped after deep_merge "
+            "to guard against alg_data containing it"
         )
 
     def test_list_replacement(self, tmp_path):
@@ -3784,3 +3784,139 @@ class TestCompare:
         assert "TTFT p50" in out          # stdout has the table
         assert out_file.exists()
         assert "TTFT p50" in out_file.read_text()  # file also has the table
+
+    def test_malformed_baseline_exits_1(self, tmp_path):
+        """CMP-14: malformed JSON in --baseline file → exit 1 (symmetric with CMP-7 for treatment)."""
+        b = tmp_path / "baseline.json"
+        t = tmp_path / "treatment.json"
+        b.write_text("not json {{{")
+        self._write_results(t, [self._workload("wl1")])
+        rc, out, err = _run_cli("compare", "--baseline", str(b), "--treatment", str(t))
+        assert rc == 1, f"Expected exit 1 for malformed baseline, got {rc}"
+        assert "ERROR" in err
+
+    def test_empty_workloads_list_exits_1(self, tmp_path):
+        """CMP-15: baseline file with empty workloads list → exit 1 (no pairs possible)."""
+        b = tmp_path / "baseline.json"
+        t = tmp_path / "treatment.json"
+        b.write_text(json.dumps({"workloads": []}))
+        self._write_results(t, [self._workload("wl1")])
+        rc, out, err = _run_cli("compare", "--baseline", str(b), "--treatment", str(t))
+        assert rc == 1, f"Expected exit 1 for empty workloads, got {rc}"
+
+    def test_missing_workloads_key_exits_1(self, tmp_path):
+        """CMP-16: baseline file missing 'workloads' key entirely → exit 1."""
+        b = tmp_path / "baseline.json"
+        t = tmp_path / "treatment.json"
+        b.write_text(json.dumps({"results": []}))
+        self._write_results(t, [self._workload("wl1")])
+        rc, out, err = _run_cli("compare", "--baseline", str(b), "--treatment", str(t))
+        assert rc == 1, f"Expected exit 1 for missing workloads key, got {rc}"
+        assert "ERROR" in err
+
+    def test_partial_metric_keys_shows_na_for_missing(self, tmp_path):
+        """CMP-17: workload with one metric key absent → that row shows N/A, exit 0, warning on stderr."""
+        b = tmp_path / "baseline.json"
+        t = tmp_path / "treatment.json"
+        # baseline missing tpot_p99
+        b.write_text(json.dumps({"workloads": [{"name": "wl1", "metrics": {
+            "ttft_p50": 100.0, "ttft_p99": 200.0, "tpot_p50": 30.0
+        }}]}))
+        self._write_results(t, [self._workload("wl1")])
+        rc, out, err = _run_cli("compare", "--baseline", str(b), "--treatment", str(t))
+        assert rc == 0, f"exit {rc}: {err}"
+        assert "N/A" in out
+        assert "WARN" in err
+        assert "tpot_p99" in err
+
+    def test_numeric_delta_and_percent_values(self, tmp_path):
+        """CMP-18: verify computed delta and percentage are arithmetically correct."""
+        b = tmp_path / "baseline.json"
+        t = tmp_path / "treatment.json"
+        self._write_results(b, [self._workload("wl1", ttft_p50=100.0)])
+        self._write_results(t, [self._workload("wl1", ttft_p50=90.0)])
+        rc, out, err = _run_cli("compare", "--baseline", str(b), "--treatment", str(t))
+        assert rc == 0, f"exit {rc}: {err}"
+        # delta = 90.0 - 100.0 = -10.0; pct = -10.0%
+        assert "-10.0" in out
+        assert "-10.0%" in out
+
+
+class TestMergeValuesMissingTestGaps:
+    """Additional TestMergeValues tests covering gaps identified in review."""
+
+    def _write_yaml(self, path: Path, data: dict) -> None:
+        import yaml
+        path.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False))
+
+    def _minimal_env_defaults(self) -> dict:
+        return {
+            "stack": {
+                "gateway": {
+                    "helmValues": {
+                        "gateway": {"provider": "istio", "gatewayClassName": "istio"}
+                    }
+                }
+            }
+        }
+
+    def _minimal_algorithm_values(self) -> dict:
+        return {
+            "stack": {
+                "model": {
+                    "modelName": "Org/Model-7B",
+                    "helmValues": {
+                        "modelArtifacts": {"name": "Org/Model-7B", "uri": "pvc://pvc/model"},
+                        "decode": {
+                            "replicas": 2,
+                            "containers": [{"image": "vllm/vllm-openai:v0.11.0"}],
+                        },
+                    },
+                },
+                "gaie": {
+                    "treatment": {
+                        "helmValues": {
+                            "inferenceExtension": {
+                                "pluginsCustomConfig": {"custom-plugins.yaml": "cfg"}
+                            }
+                        }
+                    }
+                },
+            },
+            "observe": {
+                "image": "ghcr.io/inference-sim/blis:v0.6.13",
+                "workloads": [{"name": "wl-a", "spec": "version: '1'"}],
+            },
+        }
+
+    def test_malformed_env_yaml_exits_2(self, tmp_path):
+        """MV: env file exists but contains invalid YAML → exit 2 (infrastructure error)."""
+        env_file = tmp_path / "env.yaml"
+        alg_file = tmp_path / "alg.yaml"
+        out_file = tmp_path / "out.yaml"
+        env_file.write_text(": {bad yaml: [unclosed")
+        self._write_yaml(alg_file, self._minimal_algorithm_values())
+        rc, out, err = _run_cli(
+            "merge-values",
+            "--env", str(env_file),
+            "--algorithm", str(alg_file),
+            "--out", str(out_file),
+        )
+        assert rc == 2, f"Expected exit 2 for malformed env YAML, got {rc}. stderr: {err}"
+        assert "ERROR" in err
+
+    def test_malformed_algorithm_yaml_exits_2(self, tmp_path):
+        """MV: algorithm file exists but contains invalid YAML → exit 2 (infrastructure error)."""
+        env_file = tmp_path / "env.yaml"
+        alg_file = tmp_path / "alg.yaml"
+        out_file = tmp_path / "out.yaml"
+        self._write_yaml(env_file, self._minimal_env_defaults())
+        alg_file.write_text(": {bad yaml: [unclosed")
+        rc, out, err = _run_cli(
+            "merge-values",
+            "--env", str(env_file),
+            "--algorithm", str(alg_file),
+            "--out", str(out_file),
+        )
+        assert rc == 2, f"Expected exit 2 for malformed algorithm YAML, got {rc}. stderr: {err}"
+        assert "ERROR" in err

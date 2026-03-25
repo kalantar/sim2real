@@ -129,7 +129,7 @@ Stage 3 Step 8 generates Tekton benchmarking artifacts using a two-layer config 
 Infrastructure choices that BLIS doesn't model: gateway type and sizing, connection pool settings, baseline (load-aware) scorer config, model deployment constants (auth secret, service port, `prefill.create`), and `observe.noise_runs`. Also contains image overrides applied at merge time:
 - `stack.model.vllm_image` — when set, replaces the vLLM serving image from `blis_router/llm_config.yaml` (e.g. substitute a llm-d custom vLLM build like `ghcr.io/llm-d/llm-d-cuda:v0.5.1`); comment out to use the original simulation image.
 
-Also contains `pipeline.fast_iteration` (boolean, default `true`): when `true`, Stage 5 exits after Suites A/B/C (skips cluster benchmarks) and Stage 6 skips PR creation entirely. Set to `false` when the algorithm is ready for full validation and PR submission.
+Also contains `pipeline.fast_iteration` (boolean, default `true`): when `true`, Stage 5 exits after Suites A/B/C (skips cluster benchmarks) and Stage 6 skips PR creation entirely. Set to `false` when the algorithm is ready for full validation and PR submission. This key is stripped by `merge-values` and does not appear in `workspace/tekton/values.yaml`.
 
 Edit this file when switching gateway providers, tuning cluster-level parameters, overriding the vLLM image, or changing the fast-iteration mode. The file is committed and shared across algorithm runs.
 
