@@ -3334,6 +3334,9 @@ class TestMergeValues:
         assert spec["num_requests"] == 8, (
             f"Expected num_requests=8 (int(round(3*2.5))), got: {spec.get('num_requests')}"
         )
+        assert isinstance(spec["num_requests"], int), (
+            f"Expected num_requests to be int, got: {type(spec['num_requests'])}"
+        )
 
     def test_request_multiplier_spec_without_num_requests(self, tmp_path):
         """When workload spec has no num_requests field, request_multiplier does not crash."""
