@@ -3338,8 +3338,86 @@ class TestMergeValues:
             f"Expected num_requests to be int, got: {type(spec['num_requests'])}"
         )
 
+    def test_request_multiplier_rounds_half_to_even(self, tmp_path):
+        """Python banker's rounding: 2.5 rounds to 2 (even), not 3."""
+        import yaml
+
+        env_file = tmp_path / "env.yaml"
+        alg_file = tmp_path / "alg.yaml"
+        out_file = tmp_path / "out.yaml"
+
+        env = self._minimal_env_defaults()
+        env["observe"] = {"request_multiplier": 2.5}
+        self._write_yaml(env_file, env)
+
+        alg = self._minimal_algorithm_values()
+        alg["observe"]["workloads"] = [
+            {"name": "wl-a", "spec": "num_requests: 1\n"},  # 1 * 2.5 = 2.5 → rounds DOWN to 2
+        ]
+        self._write_yaml(alg_file, alg)
+
+        rc, out, err = _run_cli(
+            "merge-values",
+            "--env", str(env_file),
+            "--algorithm", str(alg_file),
+            "--out", str(out_file),
+        )
+        assert rc == 0, f"exit {rc}: {err}"
+        result = self._load_yaml(out_file)
+        spec = yaml.safe_load(result["observe"]["workloads"][0]["spec"])
+        # int(round(1 * 2.5)) = int(round(2.5)) = 2  (banker's rounding: 2 is even)
+        assert spec["num_requests"] == 2, (
+            f"Expected num_requests=2 (banker's rounding of 2.5), got: {spec.get('num_requests')}"
+        )
+
+    def test_request_multiplier_mixed_workloads(self, tmp_path):
+        """Mixed workload list: workloads with and without num_requests are handled correctly."""
+        import yaml
+
+        env_file = tmp_path / "env.yaml"
+        alg_file = tmp_path / "alg.yaml"
+        out_file = tmp_path / "out.yaml"
+
+        env = self._minimal_env_defaults()
+        env["observe"] = {"request_multiplier": 10}
+        self._write_yaml(env_file, env)
+
+        alg = self._minimal_algorithm_values()
+        alg["observe"]["workloads"] = [
+            {"name": "wl-with", "spec": "num_requests: 500\naggregate_rate: 50.0\n"},
+            {"name": "wl-without", "spec": "aggregate_rate: 20.0\n"},  # no num_requests
+        ]
+        self._write_yaml(alg_file, alg)
+
+        rc, out, err = _run_cli(
+            "merge-values",
+            "--env", str(env_file),
+            "--algorithm", str(alg_file),
+            "--out", str(out_file),
+        )
+        assert rc == 0, f"exit {rc}: {err}"
+        result = self._load_yaml(out_file)
+        workloads = result["observe"]["workloads"]
+        spec_with = yaml.safe_load(workloads[0]["spec"])
+        spec_without = yaml.safe_load(workloads[1]["spec"])
+        assert spec_with["num_requests"] == 5000, (
+            f"Expected wl-with num_requests=5000, got: {spec_with.get('num_requests')}"
+        )
+        assert spec_with["aggregate_rate"] == 50.0, (
+            f"Expected wl-with aggregate_rate=50.0 preserved, got: {spec_with.get('aggregate_rate')}"
+        )
+        assert "num_requests" not in spec_without, (
+            f"Expected wl-without to have no num_requests, got: {spec_without}"
+        )
+        assert spec_without["aggregate_rate"] == 20.0, (
+            f"Expected wl-without aggregate_rate=20.0 preserved, got: {spec_without.get('aggregate_rate')}"
+        )
+
     def test_request_multiplier_spec_without_num_requests(self, tmp_path):
-        """When workload spec has no num_requests field, request_multiplier does not crash."""
+        """When workload spec has no num_requests field, request_multiplier does not crash
+        and the original spec is preserved unchanged."""
+        import yaml
+
         env_file = tmp_path / "env.yaml"
         alg_file = tmp_path / "alg.yaml"
         out_file = tmp_path / "out.yaml"
@@ -3363,9 +3441,16 @@ class TestMergeValues:
         assert "request_multiplier" not in result.get("observe", {}), (
             "observe.request_multiplier must be stripped from output"
         )
+        # original spec must be preserved
+        workloads = result["observe"]["workloads"]
+        spec = yaml.safe_load(workloads[0]["spec"])
+        assert "num_requests" not in spec, (
+            f"Expected no num_requests in spec, got: {spec}"
+        )
 
     def test_request_multiplier_invalid_spec_yaml(self, tmp_path):
-        """When workload spec is invalid YAML, merge succeeds (rc=0) and warns on stderr."""
+        """When workload spec is invalid YAML, merge succeeds (rc=0), warns on stderr,
+        and the bad workload's original spec is preserved unchanged in the output."""
         env_file = tmp_path / "env.yaml"
         alg_file = tmp_path / "alg.yaml"
         out_file = tmp_path / "out.yaml"
@@ -3374,9 +3459,10 @@ class TestMergeValues:
         env["observe"] = {"request_multiplier": 10}
         self._write_yaml(env_file, env)
 
+        bad_spec = ": invalid yaml ["
         alg = self._minimal_algorithm_values()
         alg["observe"]["workloads"] = [
-            {"name": "wl-a", "spec": ": invalid yaml ["},
+            {"name": "wl-a", "spec": bad_spec},
         ]
         self._write_yaml(alg_file, alg)
 
@@ -3389,6 +3475,14 @@ class TestMergeValues:
         assert rc == 0, f"exit {rc}: merge should succeed despite bad spec YAML. stderr: {err}"
         assert "WARNING" in err, (
             f"Expected WARNING in stderr for unparseable spec YAML, got: {err!r}"
+        )
+        result = self._load_yaml(out_file)
+        workloads = result["observe"]["workloads"]
+        assert workloads[0]["spec"] == bad_spec, (
+            f"Expected bad spec to be preserved unchanged, got: {workloads[0]['spec']!r}"
+        )
+        assert "request_multiplier" not in result.get("observe", {}), (
+            "observe.request_multiplier must be stripped from output"
         )
 
     def test_request_multiplier_preserves_other_spec_fields(self, tmp_path):

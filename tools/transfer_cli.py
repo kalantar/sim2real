@@ -1879,7 +1879,18 @@ def _apply_request_multiplier(merged: dict) -> dict:
     observe = merged.get("observe", {})
     multiplier = observe.pop("request_multiplier", None)
 
-    if multiplier is None or multiplier <= 1:
+    if multiplier is None:
+        return merged
+
+    if not isinstance(multiplier, (int, float)):
+        print(
+            f"ERROR: observe.request_multiplier must be a number, "
+            f"got {type(multiplier).__name__!r} (value: {multiplier!r}).",
+            file=sys.stderr,
+        )
+        return merged
+
+    if multiplier <= 1:
         return merged
 
     workloads = observe.get("workloads", [])
@@ -1897,10 +1908,32 @@ def _apply_request_multiplier(merged: dict) -> dict:
             )
             continue
         if not isinstance(spec_data, dict):
+            print(
+                f"WARNING: workload '{wl.get('name', '?')}' spec parsed to "
+                f"{type(spec_data).__name__!r} (expected dict), "
+                f"skipping request_multiplier scaling.",
+                file=sys.stderr,
+            )
             continue
         if "num_requests" in spec_data:
-            spec_data["num_requests"] = int(round(spec_data["num_requests"] * multiplier))
-            wl["spec"] = yaml.dump(spec_data, default_flow_style=False, sort_keys=False)
+            raw = spec_data["num_requests"]
+            if not isinstance(raw, (int, float)):
+                print(
+                    f"WARNING: workload '{wl.get('name', '?')}' num_requests is not a number "
+                    f"(got {type(raw).__name__!r}: {raw!r}), "
+                    f"skipping request_multiplier scaling.",
+                    file=sys.stderr,
+                )
+                continue
+            spec_data["num_requests"] = int(round(raw * multiplier))
+            try:
+                wl["spec"] = yaml.dump(spec_data, default_flow_style=False, sort_keys=False)
+            except yaml.YAMLError as e:
+                print(
+                    f"WARNING: could not re-serialize spec YAML for workload "
+                    f"'{wl.get('name', '?')}' after scaling, skipping: {e}",
+                    file=sys.stderr,
+                )
 
     return merged
 

@@ -131,7 +131,7 @@ Infrastructure choices that BLIS doesn't model: gateway type and sizing, connect
 
 Also contains `pipeline.fast_iteration` (boolean, default `true`): when `true`, Stage 5 exits after Suites A/B/C (skips cluster benchmarks) and Stage 6 skips PR creation entirely. Set to `false` when the algorithm is ready for full validation and PR submission. This key is stripped by `merge-values` and does not appear in `workspace/tekton/values.yaml`.
 
-Also contains `observe.request_multiplier` (number, default absent): when present and > 1, `merge-values` parses each workload's embedded YAML spec and multiplies `num_requests` by this factor (rounded to int). The key is stripped from `workspace/tekton/values.yaml`. This scales simulation workloads (e.g. 1500 requests) up for real-cluster benchmarks without modifying the source workload files.
+Also contains `observe.request_multiplier` (number, default `10`): when present and > 1, `merge-values` parses each workload's embedded YAML spec and multiplies `num_requests` by this factor (rounded to int). The key is stripped from `workspace/tekton/values.yaml`. This scales simulation workloads (e.g. 1500 requests) up for real-cluster benchmarks without modifying the source workload files. Set to `1` or remove the key to disable scaling.
 
 Edit this file when switching gateway providers, tuning cluster-level parameters, overriding the vLLM image, or changing the fast-iteration mode. The file is committed and shared across algorithm runs.
 
