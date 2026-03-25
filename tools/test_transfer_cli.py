@@ -4296,11 +4296,15 @@ class TestValidateTranslation:
     def _make_scorer(self, tmp_path, content=None):
         if content is None:
             content = """package scorer
-// RunningRequestsSize and KVCacheUsagePercent are used here.
-// Normalization: kvUtil := m.KVCacheUsagePercent / 100.0
-// Constants: decay := 1.0 / (1.0 + 0.6*float64(delta))
-// KV penalty: if kvUtil > 0.9 { score -= 0.5 * (kvUtil - 0.9) / 0.1 }
-// Tiebreaker: score += 0.01 / (1.0 + float64(inFlight))
+func (s *Scorer) Score(endpoints []Endpoint) map[Endpoint]float64 {
+    inFlight := m.RunningRequestsSize
+    kvUtil := m.KVCacheUsagePercent / 100.0
+    decay := 1.0 / (1.0 + 0.6*float64(delta))
+    if kvUtil > 0.9 {
+        score -= 0.5 * (kvUtil - 0.9) / 0.1
+    }
+    score += 0.01 / (1.0 + float64(inFlight))
+}
 """
         p = tmp_path / "scorer.go"
         p.write_text(content)
@@ -4339,10 +4343,12 @@ class TestValidateTranslation:
         """Scorer missing /100 normalization for KVCacheUsagePercent should exit 1."""
         alg = self._make_algorithm_summary(tmp_path)
         cov = self._make_signal_coverage(tmp_path)
-        # Scorer has RunningRequestsSize but no /100 near KVCacheUsagePercent
+        # Scorer has RunningRequestsSize but no /100 near KVCacheUsagePercent.
+        # Note: the comment intentionally contains the text "100" but NOT a division expression,
+        # verifying that comment-only /100 occurrences do not produce a false positive.
         scorer = self._make_scorer(tmp_path, content="""package scorer
 // RunningRequestsSize is used here
-// KVCacheUsagePercent is also used but without any division applied
+// KVCacheUsagePercent is an integer in [0, 100] (no division below)
 kvUtil := m.KVCacheUsagePercent
 """)
         code, output = run_cli("validate-translation",
@@ -4417,6 +4423,49 @@ kvUtil := m.KVCacheUsagePercent
         )
         assert isinstance(kv_check["normalization_correct"], bool)
         assert kv_check["normalization_correct"] is True
+
+    def test_unavailable_evolve_block_source_exits_1(self, tmp_path):
+        """When algorithm_summary.json points to a nonexistent EVOLVE-BLOCK source,
+        constant audit should fail (exit 1) not silently succeed."""
+        # Point evolve_block_source at a file that doesn't exist
+        signals = [{"name": "InFlightRequests", "type": "int", "access_path": "snap.InFlightRequests"}]
+        data = {
+            "algorithm_name": "blis_weighted_scoring",
+            "evolve_block_source": "nonexistent/path/does_not_exist.go:1-10",
+            "evolve_block_content_hash": "a" * 64,
+            "signals": signals,
+            "composite_signals": [],
+            "metrics": {"combined_score": 1.0},
+            "scope_validation_passed": True,
+            "mapping_artifact_version": "1.0",
+            "fidelity_checked": True
+        }
+        alg = tmp_path / "algorithm_summary.json"
+        alg.write_text(json.dumps(data))
+
+        # signal_coverage with no normalization so signal checks pass
+        cov_data = {
+            "signals": [
+                {"sim_name": "InFlightRequests", "prod_name": "RunningRequestsSize",
+                 "prod_access_path": "endpoint.GetMetrics().RunningRequestsSize",
+                 "fidelity_rating": "medium", "staleness_window_ms": 100, "mapped": True}
+            ],
+            "unmapped_signals": [],
+            "commit_hash": "4cd7046",
+            "coverage_complete": True
+        }
+        cov = tmp_path / "signal_coverage.json"
+        cov.write_text(json.dumps(cov_data))
+
+        scorer = self._make_scorer(tmp_path, content="package scorer\n// RunningRequestsSize\n")
+        code, output = run_cli("validate-translation",
+                               "--algorithm", str(alg),
+                               "--signal-coverage", str(cov),
+                               "--scorer-file", str(scorer))
+        assert code == 1, f"Expected exit 1 when EVOLVE-BLOCK source unavailable, got {code}: {output}"
+        assert output["status"] == "fail"
+        assert any("constant audit" in e.lower() or "evolve-block" in e.lower()
+                   for e in output.get("errors", []))
 
     @pytest.mark.skipif(
         not (Path(__file__).parent.parent / "blis_router" / "best" / "best_program.go").exists(),

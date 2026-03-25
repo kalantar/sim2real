@@ -906,14 +906,20 @@ def cmd_validate_translation(args: argparse.Namespace) -> int:
         norm_notes = ""
 
         if norm_action == "divide_prod_by_100":
-            # Check that a /100 or *0.01 division appears in the scorer near the prod metric name
-            # Find all occurrences of prod_name in scorer and check nearby context (within 5 lines)
+            # Check that a /100 or *0.01 division appears in the scorer near the prod metric name.
+            # Only non-comment code lines are considered to prevent false positives from
+            # comments like "// KVCacheUsagePercent: integer [0, 100]".
+            # Window: 2 lines before through 5 lines after each occurrence of prod_name.
+            _WINDOW_BEFORE = 2
+            _WINDOW_AFTER = 5
             lines = scorer_source.splitlines()
             prod_lines = [i for i, ln in enumerate(lines) if prod_name in ln]
             norm_found = False
             for li in prod_lines:
-                # Look at a window of 5 lines around each occurrence
-                window = "\n".join(lines[max(0, li - 2):min(len(lines), li + 5)])
+                window_lines = lines[max(0, li - _WINDOW_BEFORE):min(len(lines), li + _WINDOW_AFTER + 1)]
+                # Strip comment-only lines (Go single-line comments starting with //)
+                code_lines = [ln for ln in window_lines if not ln.lstrip().startswith("//")]
+                window = "\n".join(code_lines)
                 if re.search(r'/\s*100(?:\s*\.0)?\b|[*×]\s*0\.01\b', window):
                     norm_found = True
                     break
@@ -1000,6 +1006,7 @@ def cmd_validate_translation(args: argparse.Namespace) -> int:
             "present_in_scorer": False,
             "notes": "Constant audit skipped: EVOLVE-BLOCK source not available"
         })
+        all_errors.append(f"Constant audit skipped: EVOLVE-BLOCK source unavailable — {evolve_source_error}")
 
     # ── Normalization checks (separate list for output clarity) ───────────────
     # These are already embedded in signal_checks above; build a summary view

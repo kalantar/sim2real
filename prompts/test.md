@@ -41,8 +41,8 @@ On HALT, write `workspace/escalation.json`:
 
 **Stage 3.5 gate (translation validation):** If `workspace/translation_validation.json` exists,
 check its `verdict` field before proceeding. If `verdict == "fail"`, **HALT immediately** with
-`halt_reason: "stage3_schema_validation_failed"` and include in details that Stage 3.5 found
-unfixed translation deviations — re-run Stage 3.5 or Stage 3 before retrying Stage 4.
+`halt_reason: "critical_translation_deviation_stage3_5"` and include in details that Stage 3.5
+found unfixed translation deviations — re-run Stage 3.5 or Stage 3 before retrying Stage 4.
 If `translation_validation.json` does not exist, proceed normally (Stage 3.5 is recommended
 but not blocking when absent).
 
