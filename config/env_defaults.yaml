@@ -107,6 +107,9 @@ stack:
 
 observe:
   noise_runs: 5
+  request_multiplier: 10   # Scale workload num_requests for real-cluster benchmarks
+                            # (sim calibrates for ~1500; cluster needs ~10x).
+                            # Set to 1 or remove to disable scaling.
 
 pipeline:
   fast_iteration: true   # When true: Suites A/B/C still run, but noise gate and cluster benchmarks

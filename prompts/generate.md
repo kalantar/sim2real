@@ -315,6 +315,8 @@ Key translation rules from `blis_router/llm_config.yaml`:
         <full file contents verbatim>
   ```
 
+**Note:** `num_requests` in workload specs is scaled by `observe.request_multiplier` (from `config/env_defaults.yaml`) during the merge step. Embed the original simulation values verbatim; do not pre-scale them.
+
 Do NOT include in `algorithm_values.yaml`: gateway config, connection pool settings,
 baseline scorer config, `routing.servicePort`, `prefill.create`, `modelArtifacts.authSecretName`,
 `decode.acceleratorTypes.labelKey`, `observe.noise_runs`. These come from `config/env_defaults.yaml`
