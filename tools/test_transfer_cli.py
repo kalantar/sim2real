@@ -3195,6 +3195,237 @@ class TestMergeValues:
             f"Expected original sim image to pass through, got: {containers[0]['image']}"
         )
 
+    def test_request_multiplier_scales_num_requests(self, tmp_path):
+        """request_multiplier in env_defaults scales num_requests in each workload spec."""
+        import yaml
+
+        env_file = tmp_path / "env.yaml"
+        alg_file = tmp_path / "alg.yaml"
+        out_file = tmp_path / "out.yaml"
+
+        env = self._minimal_env_defaults()
+        env["observe"] = {"request_multiplier": 10}
+        self._write_yaml(env_file, env)
+
+        alg = self._minimal_algorithm_values()
+        alg["observe"]["workloads"] = [
+            {"name": "wl-a", "spec": "num_requests: 1500\naggregate_rate: 85.0\n"},
+            {"name": "wl-b", "spec": "num_requests: 200\naggregate_rate: 40.0\n"},
+        ]
+        self._write_yaml(alg_file, alg)
+
+        rc, out, err = _run_cli(
+            "merge-values",
+            "--env", str(env_file),
+            "--algorithm", str(alg_file),
+            "--out", str(out_file),
+        )
+        assert rc == 0, f"exit {rc}: {err}"
+        result = self._load_yaml(out_file)
+        workloads = result["observe"]["workloads"]
+        spec0 = yaml.safe_load(workloads[0]["spec"])
+        spec1 = yaml.safe_load(workloads[1]["spec"])
+        assert spec0["num_requests"] == 15000, (
+            f"Expected num_requests=15000 for wl-a, got: {spec0.get('num_requests')}"
+        )
+        assert spec1["num_requests"] == 2000, (
+            f"Expected num_requests=2000 for wl-b, got: {spec1.get('num_requests')}"
+        )
+        # request_multiplier must not appear in output
+        assert "request_multiplier" not in result.get("observe", {}), (
+            "observe.request_multiplier must be stripped from output"
+        )
+
+    def test_request_multiplier_absent_noop(self, tmp_path):
+        """When request_multiplier is absent, num_requests values pass through unchanged."""
+        import yaml
+
+        env_file = tmp_path / "env.yaml"
+        alg_file = tmp_path / "alg.yaml"
+        out_file = tmp_path / "out.yaml"
+
+        # No request_multiplier in env_defaults
+        self._write_yaml(env_file, self._minimal_env_defaults())
+
+        alg = self._minimal_algorithm_values()
+        alg["observe"]["workloads"] = [
+            {"name": "wl-a", "spec": "num_requests: 1500\n"},
+        ]
+        self._write_yaml(alg_file, alg)
+
+        rc, out, err = _run_cli(
+            "merge-values",
+            "--env", str(env_file),
+            "--algorithm", str(alg_file),
+            "--out", str(out_file),
+        )
+        assert rc == 0, f"exit {rc}: {err}"
+        result = self._load_yaml(out_file)
+        workloads = result["observe"]["workloads"]
+        spec = yaml.safe_load(workloads[0]["spec"])
+        assert spec["num_requests"] == 1500, (
+            f"Expected num_requests=1500 unchanged, got: {spec.get('num_requests')}"
+        )
+
+    def test_request_multiplier_one_noop(self, tmp_path):
+        """When request_multiplier=1, num_requests values pass through unchanged and key is stripped."""
+        import yaml
+
+        env_file = tmp_path / "env.yaml"
+        alg_file = tmp_path / "alg.yaml"
+        out_file = tmp_path / "out.yaml"
+
+        env = self._minimal_env_defaults()
+        env["observe"] = {"request_multiplier": 1}
+        self._write_yaml(env_file, env)
+
+        alg = self._minimal_algorithm_values()
+        alg["observe"]["workloads"] = [
+            {"name": "wl-a", "spec": "num_requests: 1500\n"},
+        ]
+        self._write_yaml(alg_file, alg)
+
+        rc, out, err = _run_cli(
+            "merge-values",
+            "--env", str(env_file),
+            "--algorithm", str(alg_file),
+            "--out", str(out_file),
+        )
+        assert rc == 0, f"exit {rc}: {err}"
+        result = self._load_yaml(out_file)
+        workloads = result["observe"]["workloads"]
+        spec = yaml.safe_load(workloads[0]["spec"])
+        assert spec["num_requests"] == 1500, (
+            f"Expected num_requests=1500 unchanged with multiplier=1, got: {spec.get('num_requests')}"
+        )
+        assert "request_multiplier" not in result.get("observe", {}), (
+            "observe.request_multiplier must be stripped from output even when value is 1"
+        )
+
+    def test_request_multiplier_rounds_to_int(self, tmp_path):
+        """request_multiplier with fractional value rounds to nearest int."""
+        import yaml
+
+        env_file = tmp_path / "env.yaml"
+        alg_file = tmp_path / "alg.yaml"
+        out_file = tmp_path / "out.yaml"
+
+        env = self._minimal_env_defaults()
+        env["observe"] = {"request_multiplier": 2.5}
+        self._write_yaml(env_file, env)
+
+        alg = self._minimal_algorithm_values()
+        alg["observe"]["workloads"] = [
+            {"name": "wl-a", "spec": "num_requests: 3\n"},
+        ]
+        self._write_yaml(alg_file, alg)
+
+        rc, out, err = _run_cli(
+            "merge-values",
+            "--env", str(env_file),
+            "--algorithm", str(alg_file),
+            "--out", str(out_file),
+        )
+        assert rc == 0, f"exit {rc}: {err}"
+        result = self._load_yaml(out_file)
+        workloads = result["observe"]["workloads"]
+        spec = yaml.safe_load(workloads[0]["spec"])
+        # int(round(3 * 2.5)) = int(round(7.5)) = 8
+        assert spec["num_requests"] == 8, (
+            f"Expected num_requests=8 (int(round(3*2.5))), got: {spec.get('num_requests')}"
+        )
+
+    def test_request_multiplier_spec_without_num_requests(self, tmp_path):
+        """When workload spec has no num_requests field, request_multiplier does not crash."""
+        env_file = tmp_path / "env.yaml"
+        alg_file = tmp_path / "alg.yaml"
+        out_file = tmp_path / "out.yaml"
+
+        env = self._minimal_env_defaults()
+        env["observe"] = {"request_multiplier": 10}
+        self._write_yaml(env_file, env)
+
+        # _minimal_algorithm_values() has spec: "version: '1'" — no num_requests
+        self._write_yaml(alg_file, self._minimal_algorithm_values())
+
+        rc, out, err = _run_cli(
+            "merge-values",
+            "--env", str(env_file),
+            "--algorithm", str(alg_file),
+            "--out", str(out_file),
+        )
+        assert rc == 0, f"exit {rc}: {err}"
+        result = self._load_yaml(out_file)
+        # request_multiplier must be stripped from output
+        assert "request_multiplier" not in result.get("observe", {}), (
+            "observe.request_multiplier must be stripped from output"
+        )
+
+    def test_request_multiplier_invalid_spec_yaml(self, tmp_path):
+        """When workload spec is invalid YAML, merge succeeds (rc=0) and warns on stderr."""
+        env_file = tmp_path / "env.yaml"
+        alg_file = tmp_path / "alg.yaml"
+        out_file = tmp_path / "out.yaml"
+
+        env = self._minimal_env_defaults()
+        env["observe"] = {"request_multiplier": 10}
+        self._write_yaml(env_file, env)
+
+        alg = self._minimal_algorithm_values()
+        alg["observe"]["workloads"] = [
+            {"name": "wl-a", "spec": ": invalid yaml ["},
+        ]
+        self._write_yaml(alg_file, alg)
+
+        rc, out, err = _run_cli(
+            "merge-values",
+            "--env", str(env_file),
+            "--algorithm", str(alg_file),
+            "--out", str(out_file),
+        )
+        assert rc == 0, f"exit {rc}: merge should succeed despite bad spec YAML. stderr: {err}"
+        assert "WARNING" in err, (
+            f"Expected WARNING in stderr for unparseable spec YAML, got: {err!r}"
+        )
+
+    def test_request_multiplier_preserves_other_spec_fields(self, tmp_path):
+        """request_multiplier scaling preserves all other spec fields unchanged."""
+        import yaml
+
+        env_file = tmp_path / "env.yaml"
+        alg_file = tmp_path / "alg.yaml"
+        out_file = tmp_path / "out.yaml"
+
+        env = self._minimal_env_defaults()
+        env["observe"] = {"request_multiplier": 10}
+        self._write_yaml(env_file, env)
+
+        alg = self._minimal_algorithm_values()
+        alg["observe"]["workloads"] = [
+            {"name": "wl-a", "spec": "num_requests: 100\naggregate_rate: 85.0\nseed: 42\n"},
+        ]
+        self._write_yaml(alg_file, alg)
+
+        rc, out, err = _run_cli(
+            "merge-values",
+            "--env", str(env_file),
+            "--algorithm", str(alg_file),
+            "--out", str(out_file),
+        )
+        assert rc == 0, f"exit {rc}: {err}"
+        result = self._load_yaml(out_file)
+        workloads = result["observe"]["workloads"]
+        spec = yaml.safe_load(workloads[0]["spec"])
+        assert spec["num_requests"] == 1000, (
+            f"Expected num_requests=1000, got: {spec.get('num_requests')}"
+        )
+        assert spec["aggregate_rate"] == 85.0, (
+            f"Expected aggregate_rate=85.0 preserved, got: {spec.get('aggregate_rate')}"
+        )
+        assert spec["seed"] == 42, (
+            f"Expected seed=42 preserved, got: {spec.get('seed')}"
+        )
+
 
 class TestBuildPushEpp:
     """Tests for the build-push-epp subcommand."""
