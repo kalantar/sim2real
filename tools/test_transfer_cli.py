@@ -2692,7 +2692,8 @@ class TestMergeValues:
         )
 
     def test_pipeline_key_stripped_from_output(self, tmp_path):
-        """MV-pipeline: pipeline.fast_iteration in env_defaults must not appear in values.yaml."""
+        """MV-pipeline: pipeline.fast_iteration in env_defaults must not appear in values.yaml.
+        Also verifies that other env_defaults keys (e.g. stack.gateway) still pass through."""
         env_file = tmp_path / "env.yaml"
         alg_file = tmp_path / "alg.yaml"
         out_file = tmp_path / "out.yaml"
@@ -2712,6 +2713,35 @@ class TestMergeValues:
         result = self._load_yaml(out_file)
         assert "pipeline" not in result, (
             f"'pipeline' key must not appear in merged values.yaml, got keys: {list(result)}"
+        )
+        # Other env_defaults keys still pass through
+        assert "stack" in result, "env_defaults 'stack' key must still be present in output"
+
+    def test_pipeline_key_in_algorithm_values_passes_through(self, tmp_path):
+        """MV-pipeline-alg: pipeline key in algorithm_values is NOT stripped (only env_defaults is stripped).
+        Documents current behaviour: algorithm_values should never contain 'pipeline' in practice,
+        but if it does it will appear in values.yaml. This is a design choice, not a bug."""
+        env_file = tmp_path / "env.yaml"
+        alg_file = tmp_path / "alg.yaml"
+        out_file = tmp_path / "out.yaml"
+
+        self._write_yaml(env_file, self._minimal_env_defaults())
+        alg = self._minimal_algorithm_values()
+        alg["pipeline"] = {"fast_iteration": False}
+        self._write_yaml(alg_file, alg)
+
+        rc, out, err = _run_cli(
+            "merge-values",
+            "--env", str(env_file),
+            "--algorithm", str(alg_file),
+            "--out", str(out_file),
+        )
+        assert rc == 0, f"exit {rc}: {err}"
+        result = self._load_yaml(out_file)
+        # By design: only env_data is stripped. alg_data pipeline key survives.
+        assert "pipeline" in result, (
+            "pipeline key from algorithm_values currently passes through (by design — "
+            "algorithm_values should never contain this key in practice)"
         )
 
     def test_list_replacement(self, tmp_path):
@@ -3650,7 +3680,7 @@ class TestCompare:
         assert "worse" in out
 
     def test_partial_mismatch_warns_and_exits_0(self, tmp_path):
-        """CMP-4: partial workload mismatch — matched workloads shown, WARN for unmatched, exit 0."""
+        """CMP-4: partial workload mismatch — matched workloads shown, WARN for each unmatched, exit 0."""
         b = tmp_path / "baseline.json"
         t = tmp_path / "treatment.json"
         self._write_results(b, [self._workload("wl1"), self._workload("wl2")])
@@ -3659,7 +3689,8 @@ class TestCompare:
         assert rc == 0, f"exit {rc}: {err}"
         assert "wl1" in out
         assert "WARN" in err
-        assert "wl2" in err or "wl3" in err
+        assert "wl2" in err  # wl2 missing from treatment
+        assert "wl3" in err  # wl3 missing from baseline
 
     def test_no_paired_workloads_exits_1(self, tmp_path):
         """CMP-5: no workloads can be paired — exit 1."""
@@ -3697,3 +3728,59 @@ class TestCompare:
         rc, out, err = _run_cli("compare", "--baseline", str(b), "--treatment", str(t))
         assert rc == 0, f"exit {rc}: {err}"
         assert out.count("=== Workload:") == 2
+
+    def test_zero_baseline_shows_na_percent(self, tmp_path):
+        """CMP-9: zero baseline value shows N/A for percentage instead of 0.0%."""
+        b = tmp_path / "baseline.json"
+        t = tmp_path / "treatment.json"
+        self._write_results(b, [self._workload("wl1", ttft_p50=0.0)])
+        self._write_results(t, [self._workload("wl1", ttft_p50=50.0)])
+        rc, out, err = _run_cli("compare", "--baseline", str(b), "--treatment", str(t))
+        assert rc == 0, f"exit {rc}: {err}"
+        assert "N/A" in out  # percentage should be N/A, not 0.0%
+        assert "0.0%" not in out.split("TTFT p50")[1].split("\n")[0]  # no fabricated 0.0%
+
+    def test_workload_missing_name_warns(self, tmp_path):
+        """CMP-10: workload entry missing 'name' key emits WARN and is skipped."""
+        b = tmp_path / "baseline.json"
+        t = tmp_path / "treatment.json"
+        b.write_text(json.dumps({"workloads": [{"metrics": {"ttft_p50": 1, "ttft_p99": 2,
+                                                             "tpot_p50": 3, "tpot_p99": 4}}]}))
+        self._write_results(t, [self._workload("wl1")])
+        rc, out, err = _run_cli("compare", "--baseline", str(b), "--treatment", str(t))
+        # The malformed baseline entry is skipped with WARN; no paired workloads → exit 1
+        assert rc == 1
+        assert "WARN" in err
+
+    def test_missing_treatment_file_exits_1(self, tmp_path):
+        """CMP-11: missing treatment file — exit 1."""
+        b = tmp_path / "baseline.json"
+        self._write_results(b, [self._workload("wl1")])
+        rc, out, err = _run_cli("compare",
+                                "--baseline", str(b),
+                                "--treatment", str(tmp_path / "nope.json"))
+        assert rc == 1, f"expected exit 1, got {rc}"
+
+    def test_no_change_label(self, tmp_path):
+        """CMP-12: equal baseline and treatment values show 'no change' label."""
+        b = tmp_path / "baseline.json"
+        t = tmp_path / "treatment.json"
+        self._write_results(b, [self._workload("wl1", ttft_p50=100.0)])
+        self._write_results(t, [self._workload("wl1", ttft_p50=100.0)])
+        rc, out, err = _run_cli("compare", "--baseline", str(b), "--treatment", str(t))
+        assert rc == 0, f"exit {rc}: {err}"
+        assert "no change" in out
+
+    def test_happy_path_stdout_with_out_file(self, tmp_path):
+        """CMP-13: --out writes file AND stdout still contains the table."""
+        b = tmp_path / "baseline.json"
+        t = tmp_path / "treatment.json"
+        out_file = tmp_path / "table.txt"
+        self._write_results(b, [self._workload("wl1")])
+        self._write_results(t, [self._workload("wl1", ttft_p50=90.0)])
+        rc, out, err = _run_cli("compare", "--baseline", str(b), "--treatment", str(t),
+                                "--out", str(out_file))
+        assert rc == 0, f"exit {rc}: {err}"
+        assert "TTFT p50" in out          # stdout has the table
+        assert out_file.exists()
+        assert "TTFT p50" in out_file.read_text()  # file also has the table

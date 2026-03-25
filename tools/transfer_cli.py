@@ -14,9 +14,10 @@ Commands:
     preflight                Run pre-flight cluster checks before submitting a pipeline phase
     generate-evidence        Generate workspace/transfer_evidence.md from workspace artifacts
     merge-values             Merge env_defaults.yaml + algorithm_values.yaml → values.yaml
+    compare                  Print latency comparison table from baseline/treatment results
 
 Exit codes: 0 = success, 1 = validation failure, 2 = infrastructure error
-All commands output JSON to stdout.
+All commands output JSON to stdout (compare outputs plain text).
 """
 import argparse
 import hashlib
@@ -2350,13 +2351,20 @@ def cmd_compare(args: "argparse.Namespace") -> int:
             return None
         try:
             data = _json.loads(p.read_text())
-        except _json.JSONDecodeError as e:
-            print(f"ERROR: failed to parse {label} file '{path}': {e}", file=sys.stderr)
+        except (OSError, _json.JSONDecodeError) as e:
+            print(f"ERROR: failed to read/parse {label} file '{path}': {e}", file=sys.stderr)
             return None
         if "workloads" not in data or not isinstance(data["workloads"], list):
             print(f"ERROR: {label} file '{path}' missing 'workloads' list.", file=sys.stderr)
             return None
-        return {w["name"]: w["metrics"] for w in data["workloads"] if "name" in w and "metrics" in w}
+        result = {}
+        for w in data["workloads"]:
+            if "name" not in w or "metrics" not in w:
+                print(f"WARN: workload entry in {label} missing 'name' or 'metrics' — skipped",
+                      file=sys.stderr)
+                continue
+            result[w["name"]] = w["metrics"]
+        return result
 
     baseline = _load(args.baseline, "--baseline")
     treatment = _load(args.treatment, "--treatment")
@@ -2397,11 +2405,18 @@ def cmd_compare(args: "argparse.Namespace") -> int:
             if bval is None or tval is None:
                 lines.append(f"{label:<12}{'N/A':>10}{'N/A':>11}{'N/A':>11}{'N/A':>14}")
                 continue
-            delta = tval - bval
-            pct = (delta / bval * 100) if bval != 0 else 0.0
+            try:
+                delta = tval - bval
+                if bval != 0:
+                    pct_str_val = f"{delta / bval * 100:+.1f}%"
+                else:
+                    pct_str_val = "N/A"
+            except TypeError:
+                lines.append(f"{label:<12}{'N/A':>10}{'N/A':>11}{'N/A':>11}{'N/A':>14}")
+                continue
             direction = "better" if delta < 0 else ("worse" if delta > 0 else "no change")
             delta_str = f"{delta:+.1f}"
-            pct_str = f"{pct:+.1f}% ({direction})"
+            pct_str = f"{pct_str_val} ({direction})"
             lines.append(f"{label:<12}{bval:>10.1f}{tval:>11.1f}{delta_str:>11}{pct_str:>14}")
         lines.append("")
 
@@ -2410,8 +2425,12 @@ def cmd_compare(args: "argparse.Namespace") -> int:
 
     if args.out:
         out_path = Path(args.out)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(output + "\n")
+        try:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(output + "\n")
+        except OSError as e:
+            print(f"ERROR: cannot write output file '{out_path}': {e}", file=sys.stderr)
+            return 1
 
     return 0
 
