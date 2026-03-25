@@ -1,0 +1,204 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Translation Validation",
+  "description": "Output of Stage 3.5 (Validate Translation). Records the result of verifying that the generated scorer plugin faithfully implements the EVOLVE-BLOCK logic. Consumed by Stage 4 prerequisites and Stage 6 evidence generation. verdict 'pass' means zero deviations; 'pass_with_known_gaps' means only minor/intentional deviations remain; 'fail' means critical or important deviations remain after retries.",
+  "type": "object",
+  "required": [
+    "evolve_block_hash",
+    "scorer_file",
+    "signal_checks",
+    "constant_checks",
+    "logic_trace_checks",
+    "known_gaps",
+    "deviations",
+    "fix_attempts",
+    "verdict"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "evolve_block_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "SHA-256 of the EVOLVE-BLOCK source content, verified at the start of Stage 3.5 to guard against source drift."
+    },
+    "scorer_file": {
+      "type": "string",
+      "description": "Relative path to the generated scorer file, taken from stage3_output.json scorer_file field."
+    },
+    "signal_checks": {
+      "type": "array",
+      "description": "One entry per signal in algorithm_summary.json. Mechanical check that the production metric name appears in the scorer source.",
+      "items": {
+        "type": "object",
+        "required": ["sim_name", "prod_name", "present_in_scorer", "normalization_correct"],
+        "additionalProperties": false,
+        "properties": {
+          "sim_name": {
+            "type": "string",
+            "description": "Simulation signal name (from algorithm_summary.json signals[].name)."
+          },
+          "prod_name": {
+            "type": "string",
+            "description": "Production metric name (from signal_coverage.json signals[].prod_name)."
+          },
+          "present_in_scorer": {
+            "type": "boolean",
+            "description": "True if prod_name appears in the scorer source file."
+          },
+          "normalization_correct": {
+            "description": "True if the required normalization (e.g., divide_prod_by_100) is present in the scorer. Null (field absent or JSON null) if no normalization is required for this signal."
+          },
+          "notes": {
+            "type": "string",
+            "description": "Optional notes about the signal check result."
+          }
+        }
+      }
+    },
+    "constant_checks": {
+      "type": "array",
+      "description": "One entry per evolved numeric constant extracted from the EVOLVE-BLOCK. Mechanical check that each constant appears in the scorer source.",
+      "items": {
+        "type": "object",
+        "required": ["constant", "evolve_block_context", "present_in_scorer"],
+        "additionalProperties": false,
+        "properties": {
+          "constant": {
+            "type": "number",
+            "description": "The numeric constant value (e.g., 0.6, 0.9, 0.5, 0.01)."
+          },
+          "evolve_block_context": {
+            "type": "string",
+            "description": "Code snippet or description of where the constant appears in the EVOLVE-BLOCK (e.g., 'decay factor in 1/(1+0.6*delta)')."
+          },
+          "present_in_scorer": {
+            "type": "boolean",
+            "description": "True if the constant (or an equivalent form) appears in the scorer source."
+          },
+          "scorer_context": {
+            "type": "string",
+            "description": "Code snippet or description of where the constant appears in the scorer, if found."
+          },
+          "notes": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "logic_trace_checks": {
+      "type": "array",
+      "description": "One entry per EVOLVE-BLOCK logic step checked by the LLM logic trace. check_id follows the pattern 'logic_3X_description' matching the validate-translation.md step identifiers.",
+      "items": {
+        "type": "object",
+        "required": ["check_id", "status", "description", "evolve_block_lines"],
+        "additionalProperties": false,
+        "properties": {
+          "check_id": {
+            "type": "string",
+            "pattern": "^logic_[a-z0-9_]+$",
+            "description": "Identifier matching the check table in validate-translation.md (e.g., 'logic_3d_adaptive_decay')."
+          },
+          "status": {
+            "type": "string",
+            "enum": ["pass", "deviation", "intentional_gap"],
+            "description": "pass = equivalent logic found; deviation = logic differs or missing; intentional_gap = design decision not to translate."
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "important", "minor", "intentional"],
+            "description": "Required when status is 'deviation' or 'intentional_gap'. critical = changes ranking behavior; important = changes score magnitudes; minor = equivalent reordering or style; intentional = documented design decision."
+          },
+          "description": {
+            "type": "string",
+            "description": "Human-readable summary of what was found for this check."
+          },
+          "evolve_block_lines": {
+            "type": "string",
+            "description": "Line range in the EVOLVE-BLOCK source file (e.g., '203-223')."
+          },
+          "scorer_lines": {
+            "description": "Line range in the generated scorer file where the corresponding logic appears (e.g., '162-166'), or null/absent if the logic is missing."
+          }
+        }
+      }
+    },
+    "known_gaps": {
+      "type": "array",
+      "description": "Intentional translation gaps — EVOLVE-BLOCK elements deliberately not translated to production, with rationale.",
+      "items": {
+        "type": "object",
+        "required": ["gap_id", "description", "rationale"],
+        "additionalProperties": false,
+        "properties": {
+          "gap_id": {
+            "type": "string",
+            "description": "Short identifier for the gap (e.g., 'argmax_delegation', 'random_tiebreaking')."
+          },
+          "description": {
+            "type": "string",
+            "description": "What EVOLVE-BLOCK behavior is not translated."
+          },
+          "rationale": {
+            "type": "string",
+            "description": "Why this is intentional (e.g., 'Framework performs argmax; scorer returns per-endpoint scores')."
+          }
+        }
+      }
+    },
+    "deviations": {
+      "type": "array",
+      "description": "Unintentional deviations found. Empty on pass or pass_with_known_gaps. Populated when verdict is fail (unfixed) or when fixed deviations are recorded for traceability.",
+      "items": {
+        "type": "object",
+        "required": ["check_id", "severity", "description", "fixed"],
+        "additionalProperties": false,
+        "properties": {
+          "check_id": {
+            "type": "string",
+            "description": "Matches the check_id from logic_trace_checks or 'signal_<name>' / 'constant_<value>' for mechanical checks."
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "important", "minor"],
+            "description": "critical = ranking behavior changed; important = score magnitudes changed; minor = equivalent reordering."
+          },
+          "description": {
+            "type": "string",
+            "description": "What deviation was found."
+          },
+          "fixed": {
+            "type": "boolean",
+            "description": "True if this deviation was corrected during Stage 3.5 fix attempts."
+          },
+          "fix_description": {
+            "type": "string",
+            "description": "What fix was applied, if fixed is true."
+          }
+        }
+      }
+    },
+    "fix_attempts": {
+      "type": "object",
+      "description": "Retry counters for fix attempts made during Stage 3.5.",
+      "required": ["retries_translation", "retries_total"],
+      "additionalProperties": false,
+      "properties": {
+        "retries_translation": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of translation fix retries attempted (limit 3, halt after 2 retries done)."
+        },
+        "retries_total": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total fix retries across all check categories (limit 4, halt after 3 retries done)."
+        }
+      }
+    },
+    "verdict": {
+      "type": "string",
+      "enum": ["pass", "pass_with_known_gaps", "fail"],
+      "description": "pass = zero deviations of any severity. pass_with_known_gaps = only minor/intentional deviations; critical and important all absent or fixed. fail = critical or important deviations remain after retries exhausted."
+    }
+  }
+}

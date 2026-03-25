@@ -4248,3 +4248,192 @@ class TestMergeValuesMissingTestGaps:
         )
         assert rc == 2, f"Expected exit 2 for malformed algorithm YAML, got {rc}. stderr: {err}"
         assert "ERROR" in err
+
+
+class TestValidateTranslation:
+    """Tests for the validate-translation subcommand (Stage 3.5 mechanical pre-checks)."""
+
+    def _make_algorithm_summary(self, tmp_path, signals=None):
+        if signals is None:
+            signals = [{"name": "InFlightRequests", "type": "int", "access_path": "snap.InFlightRequests"},
+                       {"name": "KVUtilization", "type": "float64", "access_path": "snap.KVUtilization"}]
+        data = {
+            "algorithm_name": "blis_weighted_scoring",
+            "evolve_block_source": "blis_router/best/best_program.go:177-262",
+            "evolve_block_content_hash": "a" * 64,
+            "signals": signals,
+            "composite_signals": [],
+            "metrics": {"combined_score": 11.46},
+            "scope_validation_passed": True,
+            "mapping_artifact_version": "1.0",
+            "fidelity_checked": True
+        }
+        p = tmp_path / "algorithm_summary.json"
+        p.write_text(json.dumps(data))
+        return p
+
+    def _make_signal_coverage(self, tmp_path, signals=None):
+        if signals is None:
+            signals = [
+                {"sim_name": "InFlightRequests", "prod_name": "RunningRequestsSize",
+                 "prod_access_path": "endpoint.GetMetrics().RunningRequestsSize",
+                 "fidelity_rating": "medium", "staleness_window_ms": 100, "mapped": True},
+                {"sim_name": "KVUtilization", "prod_name": "KVCacheUsagePercent",
+                 "prod_access_path": "endpoint.GetMetrics().KVCacheUsagePercent",
+                 "fidelity_rating": "high", "staleness_window_ms": 100, "mapped": True,
+                 "normalization": "divide_prod_by_100"},
+            ]
+        data = {
+            "signals": signals,
+            "unmapped_signals": [],
+            "commit_hash": "4cd7046",
+            "coverage_complete": True
+        }
+        p = tmp_path / "signal_coverage.json"
+        p.write_text(json.dumps(data))
+        return p
+
+    def _make_scorer(self, tmp_path, content=None):
+        if content is None:
+            content = """package scorer
+// RunningRequestsSize and KVCacheUsagePercent are used here.
+// Normalization: kvUtil := m.KVCacheUsagePercent / 100.0
+// Constants: decay := 1.0 / (1.0 + 0.6*float64(delta))
+// KV penalty: if kvUtil > 0.9 { score -= 0.5 * (kvUtil - 0.9) / 0.1 }
+// Tiebreaker: score += 0.01 / (1.0 + float64(inFlight))
+"""
+        p = tmp_path / "scorer.go"
+        p.write_text(content)
+        return p
+
+    def test_all_checks_pass_with_valid_inputs(self, tmp_path):
+        """All three checks should pass with a well-formed scorer."""
+        alg = self._make_algorithm_summary(tmp_path)
+        cov = self._make_signal_coverage(tmp_path)
+        scorer = self._make_scorer(tmp_path)
+        code, output = run_cli("validate-translation",
+                               "--algorithm", str(alg),
+                               "--signal-coverage", str(cov),
+                               "--scorer-file", str(scorer))
+        assert code == 0, f"Expected exit 0, got {code}: {output}"
+        assert output["status"] == "ok"
+        assert all(sc["present_in_scorer"] for sc in output["signal_checks"])
+
+    def test_missing_signal_in_scorer_fails(self, tmp_path):
+        """Scorer missing a production metric name should exit 1."""
+        alg = self._make_algorithm_summary(tmp_path)
+        cov = self._make_signal_coverage(tmp_path)
+        # Scorer that is missing RunningRequestsSize
+        scorer = self._make_scorer(tmp_path, content="""package scorer
+// Only KVCacheUsagePercent / 100.0 here
+""")
+        code, output = run_cli("validate-translation",
+                               "--algorithm", str(alg),
+                               "--signal-coverage", str(cov),
+                               "--scorer-file", str(scorer))
+        assert code == 1, f"Expected exit 1 for missing signal, got {code}: {output}"
+        assert output["status"] == "fail"
+        assert any("RunningRequestsSize" in e for e in output.get("errors", []))
+
+    def test_missing_normalization_fails(self, tmp_path):
+        """Scorer missing /100 normalization for KVCacheUsagePercent should exit 1."""
+        alg = self._make_algorithm_summary(tmp_path)
+        cov = self._make_signal_coverage(tmp_path)
+        # Scorer has RunningRequestsSize but no /100 near KVCacheUsagePercent
+        scorer = self._make_scorer(tmp_path, content="""package scorer
+// RunningRequestsSize is used here
+// KVCacheUsagePercent is also used but without any division applied
+kvUtil := m.KVCacheUsagePercent
+""")
+        code, output = run_cli("validate-translation",
+                               "--algorithm", str(alg),
+                               "--signal-coverage", str(cov),
+                               "--scorer-file", str(scorer))
+        assert code == 1, f"Expected exit 1 for missing normalization, got {code}: {output}"
+        assert output["status"] == "fail"
+        assert any("normalization" in e.lower() or "divide_prod_by_100" in e
+                   for e in output.get("errors", []))
+
+    def test_missing_algorithm_file_exits_2(self, tmp_path):
+        """Missing algorithm_summary.json should exit 2."""
+        cov = self._make_signal_coverage(tmp_path)
+        scorer = self._make_scorer(tmp_path)
+        code, output = run_cli("validate-translation",
+                               "--algorithm", str(tmp_path / "nonexistent.json"),
+                               "--signal-coverage", str(cov),
+                               "--scorer-file", str(scorer))
+        assert code == 2, f"Expected exit 2 for missing algorithm, got {code}: {output}"
+        assert output["status"] == "error"
+
+    def test_missing_signal_coverage_exits_2(self, tmp_path):
+        """Missing signal_coverage.json should exit 2."""
+        alg = self._make_algorithm_summary(tmp_path)
+        scorer = self._make_scorer(tmp_path)
+        code, output = run_cli("validate-translation",
+                               "--algorithm", str(alg),
+                               "--signal-coverage", str(tmp_path / "nonexistent.json"),
+                               "--scorer-file", str(scorer))
+        assert code == 2, f"Expected exit 2 for missing coverage, got {code}: {output}"
+        assert output["status"] == "error"
+
+    def test_missing_scorer_file_exits_2(self, tmp_path):
+        """Missing scorer file should exit 2."""
+        alg = self._make_algorithm_summary(tmp_path)
+        cov = self._make_signal_coverage(tmp_path)
+        code, output = run_cli("validate-translation",
+                               "--algorithm", str(alg),
+                               "--signal-coverage", str(cov),
+                               "--scorer-file", str(tmp_path / "nonexistent.go"))
+        assert code == 2, f"Expected exit 2 for missing scorer file, got {code}: {output}"
+        assert output["status"] == "error"
+
+    def test_signal_without_normalization_has_null_normalization_correct(self, tmp_path):
+        """Signal without normalization should have normalization_correct: null."""
+        alg = self._make_algorithm_summary(tmp_path)
+        cov = self._make_signal_coverage(tmp_path)
+        scorer = self._make_scorer(tmp_path)
+        code, output = run_cli("validate-translation",
+                               "--algorithm", str(alg),
+                               "--signal-coverage", str(cov),
+                               "--scorer-file", str(scorer))
+        assert code == 0
+        inflight_check = next(
+            sc for sc in output["signal_checks"] if sc["sim_name"] == "InFlightRequests"
+        )
+        assert inflight_check["normalization_correct"] is None
+
+    def test_signal_with_normalization_has_bool_normalization_correct(self, tmp_path):
+        """Signal with divide_prod_by_100 normalization should have boolean normalization_correct."""
+        alg = self._make_algorithm_summary(tmp_path)
+        cov = self._make_signal_coverage(tmp_path)
+        scorer = self._make_scorer(tmp_path)
+        code, output = run_cli("validate-translation",
+                               "--algorithm", str(alg),
+                               "--signal-coverage", str(cov),
+                               "--scorer-file", str(scorer))
+        assert code == 0
+        kv_check = next(
+            sc for sc in output["signal_checks"] if sc["sim_name"] == "KVUtilization"
+        )
+        assert isinstance(kv_check["normalization_correct"], bool)
+        assert kv_check["normalization_correct"] is True
+
+    @pytest.mark.skipif(
+        not (Path(__file__).parent.parent / "blis_router" / "best" / "best_program.go").exists(),
+        reason="blis_router/best/best_program.go not present"
+    )
+    def test_constant_audit_against_real_scorer(self, tmp_path):
+        """Constant audit should pass against the real blis_weighted_scoring.go."""
+        alg_real = REPO_ROOT / "workspace" / "algorithm_summary.json"
+        cov_real = REPO_ROOT / "workspace" / "signal_coverage.json"
+        scorer_real = REPO_ROOT / "llm-d-inference-scheduler" / "pkg" / "plugins" / "scorer" / "blis_weighted_scoring.go"
+        if not (alg_real.exists() and cov_real.exists() and scorer_real.exists()):
+            pytest.skip("Real workspace artifacts or scorer not available")
+        code, output = run_cli("validate-translation",
+                               "--algorithm", str(alg_real),
+                               "--signal-coverage", str(cov_real),
+                               "--scorer-file", str(scorer_real))
+        assert code == 0, (
+            f"Real scorer should pass all mechanical checks, got exit {code}.\n"
+            f"Errors: {output.get('errors', [])}"
+        )

@@ -39,6 +39,25 @@ On HALT, write `workspace/escalation.json`:
 - Test file missing → `"test_file_missing"`
 - Register file missing → `"register_file_missing"`
 
+**Stage 3.5 gate (translation validation):** If `workspace/translation_validation.json` exists,
+check its `verdict` field before proceeding. If `verdict == "fail"`, **HALT immediately** with
+`halt_reason: "stage3_schema_validation_failed"` and include in details that Stage 3.5 found
+unfixed translation deviations — re-run Stage 3.5 or Stage 3 before retrying Stage 4.
+If `translation_validation.json` does not exist, proceed normally (Stage 3.5 is recommended
+but not blocking when absent).
+
+```bash
+if [ -f workspace/translation_validation.json ]; then
+    .venv/bin/python tools/transfer_cli.py validate-schema workspace/translation_validation.json \
+      || echo "WARNING: translation_validation.json failed schema check"
+    VERDICT=$(.venv/bin/python -c "import json; print(json.load(open('workspace/translation_validation.json')).get('verdict',''))")
+    [ "$VERDICT" != "fail" ] || {
+      echo "HALT: Stage 3.5 translation validation failed (verdict=fail). Re-run Stage 3.5 before Stage 4."
+      exit 1
+    }
+fi
+```
+
 **Important:** Steps 1 and 2 run `go build ./...` and `go vet ./...` on the entire
 submodule. If a pre-existing build or vet failure exists in an unrelated package,
 Stage 4 will enter the retry loop even though the generated code is correct. Before

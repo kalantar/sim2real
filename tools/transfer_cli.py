@@ -14,6 +14,7 @@ Commands:
     preflight                Run pre-flight cluster checks before submitting a pipeline phase
     generate-evidence        Generate workspace/transfer_evidence.md from workspace artifacts
     merge-values             Merge env_defaults.yaml + algorithm_values.yaml → values.yaml
+    validate-translation     Mechanical translation fidelity pre-checks (Stage 3.5)
     compare                  Print latency comparison table from baseline/treatment results
 
 Exit codes: 0 = success, 1 = validation failure, 2 = infrastructure error
@@ -807,6 +808,224 @@ def cmd_validate_schema(args: argparse.Namespace) -> int:
                     schema_path=str(schema_path),
                     artifact_path=str(artifact_path),
                     violations=[])
+
+
+def cmd_validate_translation(args: argparse.Namespace) -> int:
+    """Mechanical pre-checks for translation fidelity (Stage 3.5).
+
+    Three checks against the generated scorer Go source:
+      1. Signal presence: every sim signal's production metric name appears in the scorer.
+      2. Constant audit: evolved numeric constants from the EVOLVE-BLOCK appear in the scorer.
+      3. Normalization check: signals with divide_prod_by_100 have a /100 in the scorer.
+
+    Exit codes: 0 = all pass, 1 = one or more failures, 2 = infrastructure error.
+    """
+    # ── load algorithm_summary.json ──────────────────────────────────────────
+    algorithm_path = Path(args.algorithm)
+    if not algorithm_path.exists():
+        return _output("error", 2, errors=[f"algorithm_summary not found: {algorithm_path}"],
+                       output_type="validate_translation",
+                       signal_checks=[], constant_checks=[], normalization_checks=[])
+    try:
+        algorithm = json.loads(algorithm_path.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        return _output("error", 2, errors=[f"Failed to read algorithm_summary: {e}"],
+                       output_type="validate_translation",
+                       signal_checks=[], constant_checks=[], normalization_checks=[])
+
+    # ── load signal_coverage.json ────────────────────────────────────────────
+    coverage_path = Path(args.signal_coverage)
+    if not coverage_path.exists():
+        return _output("error", 2, errors=[f"signal_coverage not found: {coverage_path}"],
+                       output_type="validate_translation",
+                       signal_checks=[], constant_checks=[], normalization_checks=[])
+    try:
+        coverage = json.loads(coverage_path.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        return _output("error", 2, errors=[f"Failed to read signal_coverage: {e}"],
+                       output_type="validate_translation",
+                       signal_checks=[], constant_checks=[], normalization_checks=[])
+
+    # ── load scorer source ────────────────────────────────────────────────────
+    scorer_path = Path(args.scorer_file)
+    if not scorer_path.exists():
+        return _output("error", 2, errors=[f"scorer file not found: {scorer_path}"],
+                       output_type="validate_translation",
+                       signal_checks=[], constant_checks=[], normalization_checks=[])
+    try:
+        scorer_source = scorer_path.read_text()
+    except OSError as e:
+        return _output("error", 2, errors=[f"Failed to read scorer file: {e}"],
+                       output_type="validate_translation",
+                       signal_checks=[], constant_checks=[], normalization_checks=[])
+
+    # ── load EVOLVE-BLOCK source for constant extraction ─────────────────────
+    evolve_block_source_field = algorithm.get("evolve_block_source", "")
+    # Format is "relative/path.go:START-END"
+    evolve_source_text: str | None = None
+    evolve_source_error: str | None = None
+    if ":" in evolve_block_source_field:
+        evolve_file_path_str = evolve_block_source_field.rsplit(":", 1)[0]
+        evolve_file_path = REPO_ROOT / evolve_file_path_str
+        if evolve_file_path.exists():
+            try:
+                evolve_source_text = evolve_file_path.read_text()
+            except OSError as e:
+                evolve_source_error = f"Failed to read EVOLVE-BLOCK source: {e}"
+        else:
+            evolve_source_error = f"EVOLVE-BLOCK source file not found: {evolve_file_path}"
+    else:
+        evolve_source_error = f"evolve_block_source field has unexpected format: {evolve_block_source_field!r}"
+
+    # Build sim->prod mapping from signal_coverage
+    coverage_map: dict[str, dict] = {}
+    for sig in coverage.get("signals", []):
+        coverage_map[sig.get("sim_name", "")] = sig
+
+    # ── Check 1: Signal presence ─────────────────────────────────────────────
+    signal_checks = []
+    all_errors = []
+    for sig in algorithm.get("signals", []):
+        sim_name = sig.get("name", "")
+        cov = coverage_map.get(sim_name, {})
+        prod_name = cov.get("prod_name", "")
+        if not prod_name:
+            signal_checks.append({
+                "sim_name": sim_name,
+                "prod_name": "",
+                "present_in_scorer": False,
+                "normalization_correct": None,
+                "notes": f"No prod_name found in signal_coverage for sim signal '{sim_name}'"
+            })
+            all_errors.append(f"Signal '{sim_name}': no prod_name in signal_coverage")
+            continue
+
+        present = prod_name in scorer_source
+        norm_action = cov.get("normalization")
+        normalization_correct: bool | None = None
+        norm_notes = ""
+
+        if norm_action == "divide_prod_by_100":
+            # Check that a /100 or *0.01 division appears in the scorer near the prod metric name
+            # Find all occurrences of prod_name in scorer and check nearby context (within 5 lines)
+            lines = scorer_source.splitlines()
+            prod_lines = [i for i, ln in enumerate(lines) if prod_name in ln]
+            norm_found = False
+            for li in prod_lines:
+                # Look at a window of 5 lines around each occurrence
+                window = "\n".join(lines[max(0, li - 2):min(len(lines), li + 5)])
+                if re.search(r'/\s*100(?:\s*\.0)?\b|[*×]\s*0\.01\b', window):
+                    norm_found = True
+                    break
+            normalization_correct = norm_found
+            if not norm_found:
+                norm_notes = f"Expected /100 or *0.01 near '{prod_name}' in scorer (normalization: divide_prod_by_100)"
+                all_errors.append(
+                    f"Signal '{sim_name}' → '{prod_name}': normalization divide_prod_by_100 not found in scorer"
+                )
+
+        check = {
+            "sim_name": sim_name,
+            "prod_name": prod_name,
+            "present_in_scorer": present,
+            "normalization_correct": normalization_correct,
+        }
+        if norm_notes:
+            check["notes"] = norm_notes
+        signal_checks.append(check)
+
+        if not present:
+            all_errors.append(
+                f"Signal '{sim_name}' → '{prod_name}': production metric not found in scorer source"
+            )
+
+    # ── Check 2: Constant audit ───────────────────────────────────────────────
+    constant_checks = []
+    if evolve_source_text is not None:
+        # Extract the EVOLVE-BLOCK region text
+        block_text, _, extract_err = _extract_evolve_block(evolve_source_text)
+        if block_text is None:
+            constant_checks.append({
+                "constant": 0,
+                "evolve_block_context": f"Could not extract EVOLVE-BLOCK: {extract_err}",
+                "present_in_scorer": False,
+                "notes": "Constant audit skipped: EVOLVE-BLOCK extraction failed"
+            })
+        else:
+            # Extract numeric literals that are not 0 or 1 (evolved constants)
+            # Match float literals (0.6, 0.9, 0.5, 0.01) and small ints that are not 0/1
+            raw_literals = re.findall(r'\b(\d+\.\d+)\b', block_text)
+            seen: dict[float, str] = {}  # value -> first context
+            for lit in raw_literals:
+                val = float(lit)
+                if val in (0.0, 1.0):
+                    continue
+                if val not in seen:
+                    # Get context: the line containing this literal
+                    for line in block_text.splitlines():
+                        if re.search(r'\b' + re.escape(lit) + r'\b', line):
+                            seen[val] = line.strip()
+                            break
+                    else:
+                        seen[val] = f"literal {lit}"
+
+            for val, ctx in seen.items():
+                # Match the value in various equivalent forms in scorer
+                # e.g., 0.6 matches "0.6", "0.60", ".6"
+                # Build a regex that matches the float in various notations
+                val_str = f"{val:.10g}"  # canonical string
+                # Try a few equivalent forms
+                int_part, _, frac_part = val_str.partition(".")
+                # Pattern: matches the exact value or trailing-zero forms
+                pattern = r'\b' + re.escape(val_str) + r'\b'
+                present = bool(re.search(pattern, scorer_source))
+                if not present:
+                    # Try integer equivalent if frac part is all zeros
+                    if frac_part and all(c == "0" for c in frac_part):
+                        present = bool(re.search(r'\b' + re.escape(int_part) + r'\b', scorer_source))
+
+                constant_checks.append({
+                    "constant": val,
+                    "evolve_block_context": ctx,
+                    "present_in_scorer": present,
+                })
+                if not present:
+                    all_errors.append(
+                        f"Constant {val_str} (from EVOLVE-BLOCK: {ctx!r}) not found in scorer"
+                    )
+    elif evolve_source_error:
+        constant_checks.append({
+            "constant": 0,
+            "evolve_block_context": evolve_source_error,
+            "present_in_scorer": False,
+            "notes": "Constant audit skipped: EVOLVE-BLOCK source not available"
+        })
+
+    # ── Normalization checks (separate list for output clarity) ───────────────
+    # These are already embedded in signal_checks above; build a summary view
+    normalization_checks = [
+        {
+            "sim_name": sc["sim_name"],
+            "prod_name": sc["prod_name"],
+            "normalization_correct": sc["normalization_correct"],
+        }
+        for sc in signal_checks
+        if sc["normalization_correct"] is not None
+    ]
+
+    if all_errors:
+        return _output("fail", 1,
+                       output_type="validate_translation",
+                       signal_checks=signal_checks,
+                       constant_checks=constant_checks,
+                       normalization_checks=normalization_checks,
+                       errors=all_errors)
+
+    return _output("ok", 0,
+                   output_type="validate_translation",
+                   signal_checks=signal_checks,
+                   constant_checks=constant_checks,
+                   normalization_checks=normalization_checks)
 
 
 def cmd_test_status(args: argparse.Namespace) -> int:
@@ -2558,6 +2777,18 @@ def main():
     p_schema = subparsers.add_parser("validate-schema", help="Validate workspace artifact against schema")
     p_schema.add_argument("artifact_path", help="Path to workspace JSON artifact")
     p_schema.set_defaults(func=cmd_validate_schema)
+
+    # validate-translation
+    p_vt = subparsers.add_parser("validate-translation",
+        help="Mechanical pre-checks for translation fidelity (Stage 3.5): "
+             "signal presence, constant audit, normalization")
+    p_vt.add_argument("--algorithm", required=True,
+                      help="Path to workspace/algorithm_summary.json")
+    p_vt.add_argument("--signal-coverage", required=True, dest="signal_coverage",
+                      help="Path to workspace/signal_coverage.json")
+    p_vt.add_argument("--scorer-file", required=True, dest="scorer_file",
+                      help="Path to generated scorer .go file")
+    p_vt.set_defaults(func=cmd_validate_translation)
 
     # test-status
     p_test_status = subparsers.add_parser("test-status",
