@@ -284,8 +284,7 @@ Read the BUILD_COMMANDS list from skill_input.json:
 BUILD_COMMANDS=$(python3 -c "
 import json
 si = json.load(open('$RUN_DIR/skill_input.json'))
-import json as j
-print(j.dumps(si.get('build_commands', [])))
+print(json.dumps(si.get('build_commands', [])))
 ")
 ```
 
@@ -319,7 +318,8 @@ Wait for the Writer to send a message to the main session. Handle each case:
 
 **On "done: ...":**
 
-The writer completed successfully. Proceed to Step 6.
+The writer completed successfully. Proceed to Step 6 (which will shut down the team
+after artifacts are collected).
 
 **On "escalate: ...":**
 
@@ -335,9 +335,18 @@ Options:
   [q] Quit and investigate — reply with: quit
 ```
 
-- If "continue N": update REVIEW_ROUNDS, send updated round budget to writer via SendMessage
+- If "continue N": update REVIEW_ROUNDS (e.g. `REVIEW_ROUNDS=$((REVIEW_ROUNDS + N))`),
+  then spawn a NEW Writer agent with the updated value substituted into the prompt.
+  The reviewer is still idle — it does not need to be restarted.
 - If "accept": proceed to Step 6 with `consensus='accepted_without_consensus'`
-- If "quit": shut down team (cleanup only, no artifact copy)
+  (Step 6 will shut down the team after artifacts are collected).
+- If "quit":
+  ```
+  SendMessage(to="writer", "shutdown")
+  SendMessage(to="reviewer", "shutdown")
+  TeamDelete()
+  ```
+  Exit without copying artifacts.
 
 **On "build-failed: ...":**
 
@@ -348,9 +357,8 @@ Error: <paste error from message>
 
 Fix the algorithm source or target repo state, then re-run /sim2real-translate.
 ```
-Shut down the team and exit.
 
-Shutdown sequence (after any terminal outcome):
+Shut down the team and exit:
 ```
 SendMessage(to="writer", "shutdown")
 SendMessage(to="reviewer", "shutdown")
@@ -480,6 +488,13 @@ Output artifacts:
 
 Next: re-run prepare.py to continue through Assembly, Summary, and Gate.
   python pipeline/prepare.py
+```
+
+Shut down the agent team:
+```
+SendMessage(to="writer", "shutdown")
+SendMessage(to="reviewer", "shutdown")
+TeamDelete()
 ```
 
 ## What This Skill Does NOT Do
