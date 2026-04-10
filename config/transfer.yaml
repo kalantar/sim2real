@@ -1,77 +1,41 @@
 kind: sim2real-transfer
-version: 1
+version: 3
 
-# ─── Algorithm Source ────────────────────────────────────────────────────────
+scenario: adaptive-routing
+
 algorithm:
-  experiment_dir: admission_by60
-  source: best/best_program.go
-  info: best/best_program_info.json
-  baseline: baselines/baseline_always_admit.go
-  workloads: workloads/
-  llm_config: llm_config.yaml
-  extras:
-    - others/evaluator.py
-    - others/calibration.json
-    - routing_config/routing_policy.yaml
+  source: sim2real_golden_correct/routers/router_adaptive.go
+  config: sim2real_golden_correct/routers/policy_adaptive.yaml
 
-# ─── Production Target ──────────────────────────────────────────────────────
-target:
-  repo: llm-d-inference-scheduler
-  plugin_dir: pkg/plugins/admission/
-  register_file: pkg/plugins/register.go
-  package: admission
-  naming:
-    suffix: "-admission-policy"
-  test_commands:
-    - ["go", "build", "./..."]
-    - ["go", "vet", "./..."]
-    - ["go", "test", "-timeout", "10m", "./pkg/plugins/admission/...", "-v"]
-  equivalence_commands:
-    - command: ["go", "test", "-tags=admission_equiv", "-json", "-v",
-                "-timeout", "10m", "./pkg/plugins/admission/..."]
-      fatal: true
-      name: "Admission decision agreement"
+baseline:
+  sim:
+    config: sim2real_golden_correct/routers/policy_baseline_322.yaml
+  real:
+    config: sim2real_golden_correct/routers/baseline_epp_template.yaml
+    notes: |
+      The baseline uses a weighted scoring profile with three scorers.
+      Sim scorer names map to real EPP types as follows:
+        precise-prefix-cache → precise-prefix-cache-scorer (llm-d plugin)
+        queue-depth          → queue-depth-scorer (llm-d plugin)
+        kv-utilization       → kv-cache-utilization-scorer (GAIE built-in — do NOT reimplement)
+      Weights come from baseline.sim.config (policy_baseline_322.yaml): 3:2:2 ratio.
+      Use EndpointPickerConfig with a single schedulingProfile named "default".
 
-# ─── LLM Context Documents ──────────────────────────────────────────────────
-# NOTE: These files must be created before running the pipeline.
-#   - docs/transfer/blis_to_llmd_mapping.md
-#   - docs/transfer/admission_template.go.md
+workloads:
+  - sim2real_golden_correct/workloads/workload_fm8_short_output_highrate.yaml
+  - sim2real_golden_correct/workloads/workload_fm2a_groups_gt_instances.yaml
+
+llm_config: admission_by60/llm_config.yaml
+
+hints:
+  files:
+  - sim2real_golden_correct/README.md
+  - sim2real_golden_correct/transfer_hint.md
+  - sim2real_golden_correct/feedback.md
+  notes: Do not implement kv-cache-utilization scorer. There are already scorers available in the parent project which is https://github.com/kubernetes-sigs/gateway-api-inference-extension. The list of scorers available are documented in https://gateway-api-inference-extension.sigs.k8s.io/guides/epp-configuration/config-text/?h=scorer.
+
 context:
-  mapping: docs/transfer/blis_to_llmd_mapping.md
-  template: docs/transfer/admission_template.go.md
-  mapping_notes: |
-    # Optional: provide domain context to steer mapping generation.
-    # Example: "This is an admission control algorithm. The a.* fields
-    # are internal plugin state and do not need production signal mappings."
-  examples: []
-  extra:
-    - admission_by60/baselines/baseline_always_admit.go
-
-# ─── Helm / Cluster Config ──────────────────────────────────────────────────
-config:
-  env_defaults: config/env_defaults.yaml
-  treatment_config_template: |
-    apiVersion: inference.networking.x-k8s.io/v1alpha1
-    kind: AdmissionPolicyConfig
-    policies:
-    - type: {plugin_type}
-  helm_path: gaie.treatment.admissionPolicy
-  baseline_config_template: |
-    apiVersion: inference.networking.x-k8s.io/v1alpha1
-    kind: AdmissionPolicyConfig
-    policies:
-    - type: always-admit
-
-# ─── Validation ──────────────────────────────────────────────────────────────
-validation:
-  mode: custom_evaluator
-  evaluator: others/evaluator.py
-  metrics:
-    - slo_attainment
-    - capped_throughput
-    - jain_fairness
-
-# ─── Artifact Naming ─────────────────────────────────────────────────────────
-artifacts:
-  plugin_snapshot: prepare_plugin.go
-  plugin_test_snapshot: prepare_plugin_test.go
+  files:
+  - blis-context.md
+  - gaie_context.md
+  - llm-d-inference-scheduler-context.md
