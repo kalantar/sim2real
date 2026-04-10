@@ -74,6 +74,11 @@ Flag any divergence from the source algorithm as `[fidelity]` NEEDS_CHANGES.
   error propagation)
 - No unused imports, dead code, or unexported types that should be exported
 - Struct fields used in scoring/regime logic documented with their purpose
+- **Test coverage (read the test files listed in the review request):**
+  - Each new plugin file must have a corresponding `_test.go` in the same package
+  - Tests must cover Factory construction, primary scoring/regime-detection branches,
+    and at least one threshold/weight value from the algorithm config
+  - If no test file is listed, raise `[code-quality]` NEEDS_CHANGES: missing test file
 
 ### Criterion 3: Registration (CRITICAL)
 

@@ -47,6 +47,15 @@ Follow `prompts/prepare/translate.md`. Specifically:
 4. Define a `Type` constant (kebab-case string) and a `Factory` function in your plugin file
 5. Register the plugin in `{TARGET_REPO}/pkg/plugins/register.go` with `plugin.Register(pkg.TypeConst, pkg.FactoryFunc)`
 6. Write `{RUN_DIR}/treatment_config.yaml` with `kind: {CONFIG_KIND}`
+7. **Write tests** — this is required, not optional:
+   - For every new plugin Go file you create (e.g. `foo.go`), write a corresponding
+     `foo_test.go` in the same package directory
+   - Tests must cover: Factory function construction, scoring/regime-detection logic
+     (at least the main branches), and any threshold/weight values from `{ALGO_CONFIG}`
+   - If you modify an existing file that already has a `_test.go`, update the tests to
+     cover your changes
+   - Include all test files in `files_created` (for new `_test.go`) or `files_modified`
+     (for updated `_test.go`) in `translation_output.json`
 
 ## Step 1.5: Write Preliminary translation_output.json
 
@@ -125,7 +134,8 @@ After each green build, send a review request to the reviewer agent:
 
 ```
 REVIEW REQUEST — Round <N>
-Plugin files: <absolute paths of all files_created, one per line>
+Plugin files: <absolute paths of all files_created (excluding test files), one per line>
+Test files: <absolute paths of all _test.go files created or modified, one per line>
 Treatment config: {RUN_DIR}/treatment_config.yaml
 Build: PASSED
 Changed since last round: <brief description, or "initial" for round 1>
