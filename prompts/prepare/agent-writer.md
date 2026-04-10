@@ -37,7 +37,77 @@ Hints from the operator (held in mind, not written to disk):
 
 {HINTS_FILES_CONTENT}
 
-## Step 1: Translate
+Expert agent name (for queries): {EXPERT_AGENT_NAME}
+
+## Consulting the Expert
+
+At any point during Phases 2, 3, or 4, you can ask the Expert a question:
+```
+SendMessage({EXPERT_AGENT_NAME}, "Your question here")
+```
+Wait for the reply before proceeding. The Expert has deep knowledge of all three repos
+and will give you file:line references.
+
+## Phase 2: Baseline Config Derivation
+
+Use TaskCreate: `"Phase 2: Baseline Config Derivation"` → TaskUpdate in_progress
+
+Read:
+1. `{BASELINE_SIM_CONFIG}` — the sim baseline policy (scorer names + weights)
+2. `{BASELINE_REAL_CONFIG}` (if not null) — the real EPP YAML template
+3. `{BASELINE_REAL_NOTES}` — translation hints for baseline mapping
+
+Your goal: produce `{RUN_DIR}/baseline_config.yaml` — a real, functional EPP YAML with the
+actual scorer names and weights from `{BASELINE_SIM_CONFIG}` substituted into the real template.
+
+Rules:
+- Every scorer in `{BASELINE_SIM_CONFIG}` must appear in `baseline_config.yaml` (mapped to
+  its real EPP type via the signal mapping in `{CONTEXT_PATH}` and `{BASELINE_REAL_NOTES}`)
+- Weights must match exactly — do not approximate or normalize unless the real config requires it
+- Ask the Expert if you are unsure about any scorer type string or config field name
+- If `{BASELINE_REAL_CONFIG}` is null, derive the structure from the context document and Expert
+
+Write `{RUN_DIR}/baseline_config.yaml`. Then send to main session:
+```
+SendMessage({MAIN_SESSION_NAME}, "baseline-ready: {RUN_DIR}/baseline_config.yaml")
+```
+
+Wait for the reply. The main session will either forward user feedback ("feedback: ...") or
+send "continue". If feedback: revise `baseline_config.yaml` and re-send `baseline-ready:`.
+Repeat until you receive "continue".
+
+TaskUpdate Phase 2 → completed
+
+## Phase 3: Treatment Config Derivation
+
+Use TaskCreate: `"Phase 3: Treatment Config Derivation"` → TaskUpdate in_progress
+
+Read:
+1. `{RUN_DIR}/baseline_config.yaml` — the approved real baseline EPP YAML
+2. `{ALGO_CONFIG}` — the algorithm policy config (what changes from baseline)
+3. `{ALGO_SOURCE}` — the algorithm source (regime detection logic, thresholds)
+
+Your goal: produce `{RUN_DIR}/treatment_config.yaml` — start from `baseline_config.yaml` and
+apply the algorithm's changes. The treatment config must be **functional** (the Go code you
+will write in Phase 4 must read its parameters from this YAML, not hardcode them).
+
+Rules:
+- Start from `baseline_config.yaml` as the structural base
+- Identify the delta: which scorers change, which weights change, any new logic or thresholds
+- Every threshold and weight from `{ALGO_CONFIG}` must have a corresponding YAML field in
+  `treatment_config.yaml` — you will wire the Go code to read from these fields in Phase 4
+- Ask the Expert about config struct field names and yaml tags if needed
+
+Write `{RUN_DIR}/treatment_config.yaml`. Then send to main session:
+```
+SendMessage({MAIN_SESSION_NAME}, "treatment-ready: {RUN_DIR}/treatment_config.yaml")
+```
+
+Wait for the reply. Handle feedback / continue as in Phase 2.
+
+TaskUpdate Phase 3 → completed
+
+## Phase 4: Translate
 
 Follow `prompts/prepare/translate.md`. Specifically:
 
@@ -57,7 +127,7 @@ Follow `prompts/prepare/translate.md`. Specifically:
    - Include all test files in `files_created` (for new `_test.go`) or `files_modified`
      (for updated `_test.go`) in `translation_output.json`
 
-## Step 1.5: Write Preliminary translation_output.json
+## Phase 4.5: Write Preliminary translation_output.json
 
 After writing all plugin code (but before running the build), write `{RUN_DIR}/translation_output.json`
 with all 10 required fields you now know. This must exist before the first snapshot.
@@ -149,11 +219,23 @@ Wait for the reviewer's reply.
 2. Create `{RUN_DIR}/review/` directory if needed, write `round_<N>.json` (see schema below)
 3. Update `.state.json` using the StateMachine code in the Output Artifacts section below,
    with `review_rounds=<N>` and `consensus='approved'`
-4. Send to main:
+4. Send to main session:
    ```
-   SendMessage({MAIN_SESSION_NAME}, "done: translation complete, plugin_type=<plugin_type>")
+   SendMessage({MAIN_SESSION_NAME}, "review-passed: round=<N> plugin_type=<plugin_type>")
    ```
-5. Exit
+5. Wait for main session reply:
+   - If "done": proceed to Step 5 Exit below
+   - If "feedback: <text>": treat as a new review round with the feedback as additional
+     requirements. Apply the feedback, re-run build/test (Phase 4 Step 2), snapshot (Phase 4 Step 3), and
+     send another review request. The round counter continues from N+1.
+
+## Step 5: Exit
+
+After receiving "done" from main session, send:
+```
+SendMessage({MAIN_SESSION_NAME}, "done: translation complete, plugin_type=<plugin_type>")
+```
+Then exit.
 
 ### On NEEDS_CHANGES (round < {REVIEW_ROUNDS})
 
