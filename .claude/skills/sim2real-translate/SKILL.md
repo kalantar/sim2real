@@ -97,8 +97,8 @@ python3 -c "
 import json, sys
 si = json.load(open('$RUN_DIR/skill_input.json'))
 required = ['run_name', 'run_dir', 'scenario', 'context_path', 'manifest_path',
-            'algorithm_source', 'algorithm_config', 'target', 'build_commands',
-            'config_kind', 'hints']
+            'algorithm_source', 'algorithm_config', 'baseline_sim_config',
+            'target', 'build_commands', 'config_kind', 'hints']
 missing = [f for f in required if f not in si]
 if missing:
     print(f'HALT: skill_input.json missing fields: {missing}')
@@ -130,6 +130,9 @@ for f in hints:
     print(f['content'])
     print()
 ")
+BASELINE_SIM_CONFIG=$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json'))['baseline_sim_config'])")
+BASELINE_REAL_CONFIG=$(python3 -c "import json; v=json.load(open('$RUN_DIR/skill_input.json')).get('baseline_real_config'); print(v if v else 'null')")
+BASELINE_REAL_NOTES=$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json')).get('baseline_real_notes', ''))")
 ```
 
 Verify source files exist:
@@ -151,17 +154,31 @@ from pathlib import Path
 state_path = Path('$RUN_DIR') / '.state.json'
 if not state_path.exists():
     print('State: fresh run')
+    print('BASELINE_DONE=false')
+    print('TREATMENT_DONE=false')
     sys.exit(0)
 state = json.loads(state_path.read_text())
 phases = state.get('phases', {})
 ctx = phases.get('context', {})
+bd = phases.get('baseline_derivation', {})
+td = phases.get('treatment_derivation', {})
 tr = phases.get('translate', {})
 print(f'context: {ctx.get(\"status\", \"pending\")}' + (f' (hash={ctx[\"hash\"]})' if ctx.get('hash') else ''))
+print(f'baseline_derivation: {bd.get(\"status\", \"pending\")} user_approved={bd.get(\"user_approved\", False)}')
+print(f'treatment_derivation: {td.get(\"status\", \"pending\")} user_approved={td.get(\"user_approved\", False)}')
 print(f'translate: {tr.get(\"status\", \"pending\")}')
 if tr.get('status') == 'done':
     print(f'  files={tr.get(\"files\", [])}')
     print(f'  review_rounds={tr.get(\"review_rounds\", 0)} consensus={tr.get(\"consensus\", \"?\")}')
-"
+bd_done = bd.get('status') == 'done' and bd.get('user_approved', False)
+td_done = td.get('status') == 'done' and td.get('user_approved', False)
+print(f'BASELINE_DONE={\"true\" if bd_done else \"false\"}')
+print(f'TREATMENT_DONE={\"true\" if td_done else \"false\"}')
+" | tee /tmp/resume_state.txt
+
+# Parse skip flags from python output
+BASELINE_DONE=$(grep '^BASELINE_DONE=' /tmp/resume_state.txt | cut -d= -f2)
+TREATMENT_DONE=$(grep '^TREATMENT_DONE=' /tmp/resume_state.txt | cut -d= -f2)
 ```
 
 **If `translate` phase is `done` and `translation_output.json` exists:**
@@ -274,6 +291,33 @@ print('State updated: context_file_populated=true')
 
 TaskUpdate Step 1 → completed
 
+## Step 1.5: Spawn Expert Agent
+
+Use TaskCreate: `"Step 1.5: Spawn Expert"` → TaskUpdate in_progress
+
+Read `prompts/prepare/agent-expert.md`, substitute all `{PLACEHOLDER}` values:
+- `{REPO_ROOT}` → `$REPO_ROOT`
+- `{TARGET_REPO}` → `$TARGET_REPO`
+- `{ALGO_SOURCE}` → `$ALGO_SOURCE`
+- `{ALGO_CONFIG}` → `$ALGO_CONFIG`
+- `{BASELINE_SIM_CONFIG}` → `$BASELINE_SIM_CONFIG`
+- `{BASELINE_REAL_CONFIG}` → `$BASELINE_REAL_CONFIG`
+
+Spawn the Expert agent in the background:
+```
+Agent(
+  subagent_type: general-purpose,
+  name: "expert",
+  run_in_background: true,
+  prompt: <substituted agent-expert.md content>
+)
+```
+
+The Expert initializes in the background. The Writer and Reviewer will use it during
+translation. Do not wait for Expert initialization to complete before proceeding.
+
+TaskUpdate Step 1.5 → completed
+
 ## Step 2: Team Translation
 
 Use TaskCreate: `"Step 2: Team Translation"` → TaskUpdate in_progress
@@ -292,7 +336,11 @@ Read the two prompt templates and construct agent prompts by substituting
 all `{PLACEHOLDER}` values with the corresponding shell variables
 (`{REPO_ROOT}` → `$REPO_ROOT`, `{RUN_DIR}` → `$RUN_DIR`, `{CONTEXT_PATH}` →
 `$CONTEXT_PATH`, `{ALGO_SOURCE}` → `$ALGO_SOURCE`, `{ALGO_CONFIG}` →
-`$ALGO_CONFIG`, `{TARGET_REPO}` → `$TARGET_REPO`, `{CONFIG_KIND}` →
+`$ALGO_CONFIG`, `{BASELINE_SIM_CONFIG}` → `$BASELINE_SIM_CONFIG`,
+`{BASELINE_REAL_CONFIG}` → `$BASELINE_REAL_CONFIG`,
+`{BASELINE_REAL_NOTES}` → `$BASELINE_REAL_NOTES`,
+`{EXPERT_AGENT_NAME}` → `"expert"`,
+`{TARGET_REPO}` → `$TARGET_REPO`, `{CONFIG_KIND}` →
 `$CONFIG_KIND`, `{REVIEW_ROUNDS}` → `$REVIEW_ROUNDS`, `{SCENARIO}` →
 `$SCENARIO`, `{BUILD_COMMANDS}` → `$BUILD_COMMANDS`, `{HINTS_TEXT}` →
 `$HINTS_TEXT`, `{HINTS_FILES_CONTENT}` → `$HINTS_FILES_CONTENT`,
@@ -315,6 +363,81 @@ Use Agent tool to spawn the Writer (starts immediately, name="writer"):
 - name: "writer"
 
 Wait for the Writer to send a message to the main session. Handle each case:
+
+**On "baseline-ready: ...":**
+
+Read `$RUN_DIR/baseline_config.yaml` and print to user:
+```
+━━━ Baseline Config (derived from sim → real EPP) ━━━
+<file contents>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Provide feedback to revise, or type 'done' to proceed.
+```
+
+Read user input. If feedback:
+```
+SendMessage("writer", "feedback: <user feedback text>")
+```
+If "done":
+```bash
+python3 -c "
+import sys
+sys.path.insert(0, '$REPO_ROOT')
+from pipeline.lib.state_machine import StateMachine
+state = StateMachine.load('$RUN_DIR')
+state.update('baseline_derivation', status='done', user_approved=True)
+print('State: baseline_derivation done')
+"
+SendMessage("writer", "continue")
+```
+
+**On "treatment-ready: ...":**
+
+Read `$RUN_DIR/treatment_config.yaml` and print to user:
+```
+━━━ Treatment Config (derived from baseline + algorithm) ━━━
+<file contents>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Provide feedback to revise, or type 'done' to proceed.
+```
+
+Handle feedback / continue as for `baseline-ready:`. On continue, update state:
+```bash
+python3 -c "
+import sys
+sys.path.insert(0, '$REPO_ROOT')
+from pipeline.lib.state_machine import StateMachine
+state = StateMachine.load('$RUN_DIR')
+state.update('treatment_derivation', status='done', user_approved=True)
+print('State: treatment_derivation done')
+"
+SendMessage("writer", "continue")
+```
+
+**On "review-passed: round=N ...":**
+
+```bash
+python3 -c "
+import json
+o = json.load(open('$RUN_DIR/translation_output.json'))
+print('Plugin files:', o.get('files_created', []))
+"
+python3 -c "print(open('$RUN_DIR/treatment_config.yaml').read())"
+```
+
+Print to user:
+```
+━━━ Review Passed ━━━
+Treatment Config: <contents above>
+Plugin files: <list above>
+
+Provide feedback for another round, or type 'done' to finish.
+```
+
+If feedback: `SendMessage("writer", "feedback: <text>")`
+If "done": `SendMessage("writer", "done")`
 
 **On "done: ...":**
 
@@ -344,6 +467,7 @@ Options:
   ```
   SendMessage(to="writer", "shutdown")
   SendMessage(to="reviewer", "shutdown")
+  SendMessage(to="expert", "shutdown")
   TeamDelete()
   ```
   Exit without copying artifacts.
@@ -362,6 +486,7 @@ Shut down the team and exit:
 ```
 SendMessage(to="writer", "shutdown")
 SendMessage(to="reviewer", "shutdown")
+SendMessage(to="expert", "shutdown")
 TeamDelete()
 ```
 
@@ -416,6 +541,10 @@ for f in o['files_created'] + o.get('files_modified', []):
     shutil.copy2(src, dst)
     print(f'  {Path(f).name} → generated/')
 shutil.copy2('$RUN_DIR/treatment_config.yaml', gen / 'treatment_config.yaml')
+baseline_cfg = Path('$RUN_DIR') / 'baseline_config.yaml'
+if baseline_cfg.exists():
+    shutil.copy2(baseline_cfg, gen / 'baseline_config.yaml')
+    print('  baseline_config.yaml → generated/')
 print('Generated artifacts ready.')
 "
 ```
@@ -494,6 +623,7 @@ Shut down the agent team:
 ```
 SendMessage(to="writer", "shutdown")
 SendMessage(to="reviewer", "shutdown")
+SendMessage(to="expert", "shutdown")
 TeamDelete()
 ```
 
