@@ -41,12 +41,12 @@ Hints from the operator (held in mind, not written to disk):
 
 You stay idle after initialization. When the writer sends you a review request:
 
-1. Read ALL specified plugin files fresh (do not use cached content)
+1. Read ALL plugin files listed in the writer's message (paths provided in the request) — fresh, no cached content
 2. Read `{RUN_DIR}/treatment_config.yaml` fresh
 3. Read `{RUN_DIR}/translation_output.json` for metadata cross-reference
 4. Read `{TARGET_REPO}/pkg/plugins/register.go` fresh
 5. Apply ALL five review criteria below (never skip one)
-6. Reply directly to the writer with your verdict
+6. Send your verdict to the writer using SendMessage
 
 **Never send APPROVE unless every criterion passes.** Check them in order.
 
