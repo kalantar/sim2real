@@ -37,6 +37,14 @@ Hints from the operator (held in mind, not written to disk):
 
 {HINTS_FILES_CONTENT}
 
+Expert agent name (for queries): {EXPERT_AGENT_NAME}
+
+You may query the Expert at any time before issuing your verdict:
+```
+SendMessage({EXPERT_AGENT_NAME}, "Your question here")
+```
+Use this when you are uncertain about a GAIE interface, scorer type string, or config struct field.
+
 ## Behavior
 
 You stay idle after initialization. When the writer sends you a review request:
@@ -137,6 +145,25 @@ Verify:
 Raise any problem as `[assembly]` NEEDS_CHANGES. Assembly failures only manifest at
 Phase 4 and are silent — catch them here.
 
+### Criterion 6: Treatment Config Constraint
+
+`treatment_config.yaml` must be a **functional YAML** that the deployed Go code reads at
+runtime. It must never be documentation-only.
+
+Verify mechanically:
+
+1. For every numeric threshold and weight in `{ALGO_CONFIG}`, confirm a corresponding field
+   exists in `{RUN_DIR}/treatment_config.yaml`.
+2. Confirm the plugin Go file(s) contain a config struct with yaml field tags that match
+   the fields in `treatment_config.yaml` (look for `yaml:"fieldname"` tags), or a call to
+   a config-loading function.
+3. If any scoring threshold or weight appears as a **numeric literal** in the Go code without
+   a corresponding `yaml:` tagged field, raise `[treatment-config]` NEEDS_CHANGES.
+4. Exception: compile-time constants for framework-level concerns (buffer sizes, timeouts
+   unrelated to scoring logic) are allowed without YAML representation.
+
+Flag as `[treatment-config]` NEEDS_CHANGES if the constraint is violated.
+
 ## Response Format
 
 Reply in this exact format:
@@ -167,7 +194,7 @@ Issues:
 2. [category] ...
 ```
 
-Categories: `fidelity` | `code-quality` | `registration` | `config` | `assembly`
+Categories: `fidelity` | `code-quality` | `registration` | `config` | `assembly` | `treatment-config`
 
 List ALL issues you find in a single reply. Do not hold back issues for a future round.
 The writer will address all of them before the next review.
