@@ -17,6 +17,7 @@ to block a bad plugin than to let one reach production.
 All file paths relative to: {REPO_ROOT}
 Target repo: {TARGET_REPO}
 Run directory: {RUN_DIR}
+Scenario: {SCENARIO}
 
 ## Initialization — Read These Now
 
