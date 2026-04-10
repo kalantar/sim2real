@@ -117,7 +117,8 @@ Wait for the reviewer's reply.
 
 1. Write `{RUN_DIR}/translation_output.json` (see schema below)
 2. Create `{RUN_DIR}/review/` directory if needed, write `round_<N>.json` (see schema below)
-3. Update `.state.json` (see below)
+3. Update `.state.json` using the StateMachine code in the Output Artifacts section below,
+   with `review_rounds=<N>` and `consensus='approved'`
 4. Send to main:
    ```
    SendMessage(main-session, "done: translation complete, plugin_type=<plugin_type>")
@@ -126,6 +127,8 @@ Wait for the reviewer's reply.
 
 ### On NEEDS_CHANGES (round < {REVIEW_ROUNDS})
 
+Before fixing issues, write `{RUN_DIR}/review/round_<N>.json` with `"consensus": false, "approve_count": 0` and the reviewer's issues list.
+
 Fix ALL issues listed in the reviewer's reply. Your full conversation context accumulates
 every prior round's feedback — use it. Then repeat Step 2 (build/test) → Step 3 (snapshot)
 → Step 4 (next review round, incrementing N).
@@ -133,6 +136,8 @@ every prior round's feedback — use it. Then repeat Step 2 (build/test) → Ste
 Do NOT send the reviewer broken code. Only send after a green build.
 
 ### On NEEDS_CHANGES (round == {REVIEW_ROUNDS})
+
+Write `{RUN_DIR}/review/round_<N>.json` with `"consensus": false, "approve_count": 0` and the reviewer's issues list.
 
 Collect all remaining issues from the reviewer's reply. Send to main:
 ```
@@ -208,5 +213,17 @@ print('State updated: translate done')
 "
 ```
 
-On escalate path, use `consensus='accepted_without_consensus'` (only after operator
-approves via main session).
+**On escalate path** (after operator chooses [a]ccept):
+```bash
+python3 -c "
+import json, sys
+sys.path.insert(0, '{REPO_ROOT}')
+from pipeline.lib.state_machine import StateMachine
+state = StateMachine.load('{RUN_DIR}')
+state.mark_done('translate',
+    files=json.load(open('{RUN_DIR}/translation_output.json'))['files_created'],
+    review_rounds=<N>,
+    consensus='accepted_without_consensus')
+print('State updated: translate done (accepted without consensus)')
+"
+```
