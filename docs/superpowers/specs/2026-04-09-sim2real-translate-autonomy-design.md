@@ -312,6 +312,68 @@ else:
 All other checks (Check 2: plugin_type in epp.yaml; Check 3: treatment_config kind match;
 Check 4: files_created exist) are unchanged.
 
+### 9. `_compile_cluster_packages` — richer cluster artifacts
+
+**Current output per package (`cluster/{phase}/`):**
+- `epp.yaml` — raw EPP plugin config text (not a K8s resource)
+- `{phase}-pipeline.yaml` — full Tekton `kind: Pipeline` resource
+
+**Problems:**
+- `epp.yaml` is redundant: the EPP config is already embedded inside `{phase}-pipeline.yaml`
+  as the `gaie_config` parameter (injected by `cmd_compile_pipeline` from `values.yaml`)
+- There is no PipelineRun YAML — the execution request that binds a Pipeline to specific
+  runtime parameters (experiment ID, namespace, workload) is missing, making it impossible
+  to inspect what would actually be submitted to the cluster
+
+**New output per package (`cluster/{phase}/`):**
+- `{phase}-pipeline.yaml` — full Tekton `kind: Pipeline` resource (unchanged)
+- `pipelinerun-{workload_name}.yaml` per workload — Tekton `kind: PipelineRun` resource
+
+**`epp.yaml` is dropped.** The EPP config is fully captured inside `{phase}-pipeline.yaml`.
+
+**PipelineRun generation:** For each workload in `values.yaml` (`observe.workloads`), write
+a `pipelinerun-{workload_name}.yaml`. If a PipelineRun stub template exists in
+`tektonc-data-collection/tektoncsample/sim2real/pipelinerun.yaml` (or similar), use
+`render-pipelinerun` with variable substitution. Otherwise generate the minimal PipelineRun
+structure directly in Python — the Pipeline name and parameter names are known from the
+template (`experimentId`, `namespace`, `runName`, `workloadName`, `workloadSpec`,
+`sleepDuration`):
+
+```python
+def _make_pipelinerun(phase: str, workload: dict, run_name: str, namespace: str) -> dict:
+    wl_name = workload.get("name", workload.get("workload_name", "unknown"))
+    return {
+        "apiVersion": "tekton.dev/v1",
+        "kind": "PipelineRun",
+        "metadata": {
+            "name": f"sim2real-{phase}-{wl_name[:20]}",
+            "namespace": namespace,
+        },
+        "spec": {
+            "pipelineRef": {"name": f"sim2real-{phase}"},
+            "params": [
+                {"name": "experimentId", "value": run_name},
+                {"name": "namespace",    "value": namespace},
+                {"name": "runName",      "value": run_name},
+                {"name": "workloadName", "value": wl_name},
+                {"name": "workloadSpec", "value": yaml.dump(workload)},
+            ],
+            "workspaces": [
+                {"name": "model-cache",    "persistentVolumeClaim": {"claimName": "model-cache"}},
+                {"name": "hf-credentials", "secret": {"secretName": "hf-secret"}},
+                {"name": "data-storage",   "persistentVolumeClaim": {"claimName": "data-storage"}},
+            ],
+        }
+    }
+```
+
+`namespace` comes from `workspace/setup_config.json` (already read by `_load_setup_config`).
+If namespace is absent, fall back to `"default"` with a warning.
+
+**`validate_assembly` Check 2** currently checks `cluster/treatment/epp.yaml` — update to
+check `cluster/treatment/{treatment}-pipeline.yaml` contains `plugin_type` instead (since
+EPP config now lives inside the Pipeline YAML, not in a separate file).
+
 ---
 
 ## What Does NOT Change
@@ -334,6 +396,10 @@ Check 4: files_created exist) are unchanged.
   `target.register_file`, `target.rewrite_file`, `target.package`, and `build.test_scope`.
   Add a `hints` section to the corresponding `transfer.yaml` to preserve the intent as user
   guidance rather than hard config.
+- `cluster/{phase}/epp.yaml` is no longer generated. Any tooling that reads that file must
+  be updated to read from `{phase}-pipeline.yaml` or from `values.yaml` directly.
+- `cluster/{phase}/` gains per-workload `pipelinerun-{workload}.yaml` files that did not
+  exist before.
 - `translation_output.json` files from previous runs are schema-incompatible:
   - Missing: `register_file`, `treatment_config_generated`
   - Present (stale): `needs_custom_config`, `suggested_config`
