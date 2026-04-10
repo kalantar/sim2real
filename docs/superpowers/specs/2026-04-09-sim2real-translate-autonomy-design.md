@@ -176,25 +176,16 @@ for f in hints:
 6. Write all changes to `$TARGET_REPO`
 7. Write `translation_output.json`
 
-**Step 6 (Output): copy files with path-preserving structure into `generated/`:**
+**Step 6 (Output): `generated/` directory is a flat snapshot for operator reference:**
 
-The current Step 6 copies each file using `Path(f).name` (basename only), which loses
-provenance and risks name collisions when autonomous translation touches files in multiple
-directories. Change to preserve the relative path from the target repo root:
+Files are copied by basename (`Path(f).name`) as today — `generated/adaptive.go`,
+`generated/adaptive_test.go`, `generated/treatment_config.yaml`, etc. The full path of
+each file is already captured in `translation_output.json` (`files_created`,
+`files_modified`), which is the authoritative record of where each file lives in the
+target repo. `generated/` is a convenience snapshot; `translation_output.json` is the
+provenance record.
 
-```python
-for f in o['files_created'] + o.get('files_modified', []):
-    src = target / f
-    dst = gen / f          # preserves path, e.g. generated/pkg/plugins/scorer/adaptive.go
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(src, dst)
-```
-
-`treatment_config.yaml` continues to be copied flat: `generated/treatment_config.yaml`.
-
-The `generated/` directory is the canonical reference snapshot for the operator after the
-run. All created and modified files from the target repo are present here with their full
-relative paths intact so the operator knows exactly what was changed and where.
+This behavior is unchanged from today.
 
 **Step 5 (Review): add `--hints-json` to `review.py` invocation:**
 ```bash
@@ -318,23 +309,6 @@ else:
     pass
 ```
 
-**`_verify_generated_dir`** — change path check from basename to relative path:
-
-```python
-def _verify_generated_dir(run_dir: Path):
-    generated_dir = run_dir / "generated"
-    if not generated_dir.exists():
-        warn("generated/ directory not found — translation skill should create this.")
-        warn("Continuing without generated file copies.")
-        return
-
-    output = json.loads((run_dir / "translation_output.json").read_text())
-    for f in output.get("files_created", []) + output.get("files_modified", []):
-        # Check by relative path (not basename) to match path-preserving copy layout
-        if not (generated_dir / f).exists():
-            warn(f"generated/ missing: {f}")
-```
-
 All other checks (Check 2: plugin_type in epp.yaml; Check 3: treatment_config kind match;
 Check 4: files_created exist) are unchanged.
 
@@ -344,8 +318,7 @@ Check 4: files_created exist) are unchanged.
 
 - Context caching logic (`build_context`, hash computation, `context_file_populated` flag)
 - Skill Step 1 (context enrichment with production interfaces + examples)
-- Skill Steps 3 and 5 (build/test gate, review loop)
-- Skill Steps 4 and 6 (snapshot, output copy): destination changes to path-preserving layout, but the step logic and state update are otherwise unchanged
+- Skill Steps 3–6 (build/test gate, snapshot, review loop, output copy) — Step 6 documents that `generated/` is a flat basename snapshot and `translation_output.json` is the provenance record
 - `review.py` consensus logic (only the invocation gains `--hints-json`)
 - `config.kind`, `config.helm_path`, `gaie`, `stack`, `observe` in `env_defaults.yaml`
 - `translation_output.json` fields: `plugin_type`, `files_created`, `files_modified`,
