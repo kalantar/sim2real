@@ -293,8 +293,8 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
             sys.exit(1)
         ok("Treatment config validated")
 
-    # 4b: Baseline config comes from env_defaults (scenarios.<scenario>.gaie.baseline)
-    # Already in resolved config — will be in merged values
+    # 4b: Baseline config — from baseline_config.yaml in run dir (if Phase 2 ran),
+    # otherwise falls back to env_defaults (scenarios.<scenario>.gaie.baseline)
 
     # 4c: Generate algorithm_values.yaml
     alg_values_path = run_dir / "algorithm_values.yaml"
@@ -422,6 +422,17 @@ def _generate_algorithm_values(manifest: dict, resolved: dict, out_path: Path):
                 UserWarning,
                 stacklevel=2,
             )
+
+    # Embed baseline EPP config if derived in Phase 2 (overrides env_defaults static value)
+    baseline_cfg_path = out_path.parent / "baseline_config.yaml"
+    if baseline_cfg_path.exists():
+        bc_content = baseline_cfg_path.read_text()
+        (alg_values["stack"]
+         .setdefault("gaie", {})
+         .setdefault("baseline", {})
+         .setdefault("helmValues", {})
+         .setdefault("inferenceExtension", {})
+         ["pluginsCustomConfig"]) = {"custom-plugins.yaml": bc_content}
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(yaml.dump(alg_values, default_flow_style=False, sort_keys=False))
