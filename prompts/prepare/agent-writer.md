@@ -15,6 +15,7 @@ and iterate with the reviewer until you receive APPROVE.
 All commands run from: {REPO_ROOT}
 Target repo (submodule): {TARGET_REPO}
 Run Go commands via: `(cd {TARGET_REPO} && GOWORK=off <cmd>)`
+Main session name: {MAIN_SESSION_NAME}
 
 Verify before each major step:
 ```bash
@@ -47,6 +48,15 @@ Follow `prompts/prepare/translate.md`. Specifically:
 5. Register the plugin in `{TARGET_REPO}/pkg/plugins/register.go` with `plugin.Register(pkg.TypeConst, pkg.FactoryFunc)`
 6. Write `{RUN_DIR}/treatment_config.yaml` with `kind: {CONFIG_KIND}`
 
+## Step 1.5: Write Preliminary translation_output.json
+
+After writing all plugin code (but before running the build), write `{RUN_DIR}/translation_output.json`
+with all 10 required fields you now know. This must exist before the first snapshot.
+
+If the file list changes in a later round (e.g., you add or remove files), update it.
+
+The schema is in the Output Artifacts section below.
+
 ## Step 2: Build/Test Gate (You Own This)
 
 After writing code, run each command in `{BUILD_COMMANDS}` sequentially:
@@ -60,7 +70,7 @@ fix the Go code, and retry from command 1. Maximum 6 retry attempts total.
 
 After 6 failures without a green build, signal main and exit:
 ```
-SendMessage(main-session, "build-failed: <paste exact compiler/test error>")
+SendMessage({MAIN_SESSION_NAME}, "build-failed: <paste exact compiler/test error>")
 ```
 
 ## Step 3: Snapshot
@@ -101,6 +111,16 @@ print(f'Snapshot v$SNAP_NUM saved')
 
 Maximum rounds: {REVIEW_ROUNDS}
 
+Initialize round counter (set once before the first review):
+
+```bash
+REVIEW_ROUND=1
+```
+
+After each NEEDS_CHANGES response, increment: `REVIEW_ROUND=$((REVIEW_ROUND + 1))`
+
+Use `$REVIEW_ROUND` in the review request message and in the `round_<N>.json` filename.
+
 After each green build, send a review request to the reviewer agent:
 
 ```
@@ -121,7 +141,7 @@ Wait for the reviewer's reply.
    with `review_rounds=<N>` and `consensus='approved'`
 4. Send to main:
    ```
-   SendMessage(main-session, "done: translation complete, plugin_type=<plugin_type>")
+   SendMessage({MAIN_SESSION_NAME}, "done: translation complete, plugin_type=<plugin_type>")
    ```
 5. Exit
 
@@ -141,7 +161,7 @@ Write `{RUN_DIR}/review/round_<N>.json` with `"consensus": false, "approve_count
 
 Collect all remaining issues from the reviewer's reply. Send to main:
 ```
-SendMessage(main-session, "escalate: {REVIEW_ROUNDS} rounds exhausted
+SendMessage({MAIN_SESSION_NAME}, "escalate: {REVIEW_ROUNDS} rounds exhausted
 <paste remaining issues from reviewer reply verbatim>")
 ```
 Then exit.
@@ -194,8 +214,23 @@ Write the reviewer's verdict (preserve exact format for prepare.py summary consu
 }
 ```
 
-For NEEDS_CHANGES rounds: `"consensus": false, "approve_count": 0`, fill `issues` array
-with the reviewer's structured issues.
+For NEEDS_CHANGES rounds, write the complete schema:
+```json
+{
+  "round": <N>,
+  "consensus": false,
+  "approve_count": 0,
+  "total_successful": 1,
+  "reviews": [
+    {
+      "model": "agent-reviewer",
+      "verdict": "NEEDS_CHANGES",
+      "issues": [<structured issues from reviewer reply>],
+      "summary": "<paste reviewer's summary text>"
+    }
+  ]
+}
+```
 
 ### `.state.json` update
 
@@ -213,17 +248,4 @@ print('State updated: translate done')
 "
 ```
 
-**On escalate path** (after operator chooses [a]ccept):
-```bash
-python3 -c "
-import json, sys
-sys.path.insert(0, '{REPO_ROOT}')
-from pipeline.lib.state_machine import StateMachine
-state = StateMachine.load('{RUN_DIR}')
-state.mark_done('translate',
-    files=json.load(open('{RUN_DIR}/translation_output.json'))['files_created'],
-    review_rounds=<N>,
-    consensus='accepted_without_consensus')
-print('State updated: translate done (accepted without consensus)')
-"
-```
+Note: On the escalate path, `.state.json` is updated by the main session after operator decision — the writer does not update it.
