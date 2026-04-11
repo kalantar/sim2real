@@ -206,3 +206,138 @@ class TestListRuns:
         ])
         results = list_runs(ws, cfg)
         assert [r.name for r in results] == ["apple", "mango", "zebra"]
+
+
+class TestInspectRun:
+    def _make_run(self, tmp_path, name="adaptive6", scenario="adaptive-routing",
+                  phases=None, stages=None, files_created=None, files_modified=None):
+        run_dir = tmp_path / "runs" / name
+        if phases is None:
+            phases = {
+                "init": {"status": "done"},
+                "translate": {"status": "done", "review_rounds": 2, "consensus": "1/1"},
+                "baseline_derivation": {"status": "done", "user_approved": True},
+                "assembly": {"status": "done", "packages": ["baseline", "treatment"]},
+                "gate": {"status": "done", "verdict": "READY TO DEPLOY"},
+            }
+        if stages is None:
+            stages = {
+                "setup": {"status": "completed"},
+                "deploy": {"status": "pending", "last_completed_step": "build_epp"},
+            }
+        _write_state(run_dir, name, scenario, phases)
+        _write_meta(run_dir, stages)
+        if files_created is not None or files_modified is not None:
+            _write_translation_output(
+                run_dir,
+                files_created or [],
+                files_modified or ["pkg/plugins/scorer/adaptive_v2.go"],
+            )
+        return run_dir
+
+    def test_raises_for_nonexistent_run(self, tmp_path):
+        from pipeline.lib.run_manager import inspect_run, RunNotFoundError
+        with pytest.raises(RunNotFoundError, match="not found"):
+            inspect_run(tmp_path / "runs" / "nope")
+
+    def test_raises_for_invalid_state(self, tmp_path):
+        from pipeline.lib.run_manager import inspect_run, RunNotFoundError
+        run_dir = tmp_path / "runs" / "bad"
+        run_dir.mkdir(parents=True)
+        (run_dir / ".state.json").write_text("not json")
+        with pytest.raises(RunNotFoundError):
+            inspect_run(run_dir)
+
+    def test_returns_run_detail(self, tmp_path):
+        from pipeline.lib.run_manager import inspect_run
+        run_dir = self._make_run(tmp_path, files_modified=["pkg/plugins/scorer/adaptive_v2.go"])
+        detail = inspect_run(run_dir)
+        assert detail.name == "adaptive6"
+        assert detail.scenario == "adaptive-routing"
+        assert not detail.active  # active_run not passed
+
+    def test_active_flag_via_param(self, tmp_path):
+        from pipeline.lib.run_manager import inspect_run
+        run_dir = self._make_run(tmp_path)
+        detail = inspect_run(run_dir, active_run="adaptive6")
+        assert detail.active
+
+    def test_phases_populated(self, tmp_path):
+        from pipeline.lib.run_manager import inspect_run
+        run_dir = self._make_run(tmp_path)
+        detail = inspect_run(run_dir)
+        phase_names = [p.name for p in detail.phases]
+        assert "translate" in phase_names
+        assert "gate" in phase_names
+
+    def test_translate_notes(self, tmp_path):
+        from pipeline.lib.run_manager import inspect_run
+        run_dir = self._make_run(tmp_path)
+        detail = inspect_run(run_dir)
+        translate = next(p for p in detail.phases if p.name == "translate")
+        assert "2 review rounds" in translate.notes
+        assert "1/1" in translate.notes
+
+    def test_gate_verdict(self, tmp_path):
+        from pipeline.lib.run_manager import inspect_run
+        run_dir = self._make_run(tmp_path)
+        detail = inspect_run(run_dir)
+        gate = next(p for p in detail.phases if p.name == "gate")
+        assert gate.verdict == "READY TO DEPLOY"
+
+    def test_assembly_notes(self, tmp_path):
+        from pipeline.lib.run_manager import inspect_run
+        run_dir = self._make_run(tmp_path)
+        detail = inspect_run(run_dir)
+        assembly = next(p for p in detail.phases if p.name == "assembly")
+        assert "baseline" in assembly.notes
+        assert "treatment" in assembly.notes
+
+    def test_generated_files_from_translation_output(self, tmp_path):
+        from pipeline.lib.run_manager import inspect_run
+        run_dir = self._make_run(tmp_path,
+                                  files_created=["pkg/plugins/scorer/adaptive_v2_test.go"],
+                                  files_modified=["pkg/plugins/scorer/adaptive_v2.go"])
+        detail = inspect_run(run_dir)
+        assert "pkg/plugins/scorer/adaptive_v2.go" in detail.files_modified
+        assert "pkg/plugins/scorer/adaptive_v2_test.go" in detail.files_created
+
+    def test_deploy_stages_populated(self, tmp_path):
+        from pipeline.lib.run_manager import inspect_run
+        run_dir = self._make_run(tmp_path)
+        detail = inspect_run(run_dir)
+        assert "setup" in detail.deploy_stages
+        assert detail.deploy_stages["setup"] == "completed"
+        assert detail.deploy_last_step == "build_epp"
+
+    def test_missing_translation_output_ok(self, tmp_path):
+        """inspect_run should not fail if translation_output.json is absent."""
+        from pipeline.lib.run_manager import inspect_run
+        run_dir = self._make_run(tmp_path)  # no files_created/modified written
+        detail = inspect_run(run_dir)
+        assert detail.files_created == []
+        assert detail.files_modified == []
+
+    def test_baseline_derivation_notes(self, tmp_path):
+        from pipeline.lib.run_manager import inspect_run
+        run_dir = self._make_run(tmp_path, phases={
+            "baseline_derivation": {"status": "done", "user_approved": True},
+        })
+        detail = inspect_run(run_dir)
+        bd = next(p for p in detail.phases if p.name == "baseline_derivation")
+        assert "user approved" in bd.notes
+
+    def test_empty_phases_returns_empty_list(self, tmp_path):
+        from pipeline.lib.run_manager import inspect_run
+        run_dir = self._make_run(tmp_path, phases={})
+        detail = inspect_run(run_dir)
+        assert detail.phases == []
+
+    def test_missing_metadata_deploy_stages_empty(self, tmp_path):
+        """inspect_run should not fail if run_metadata.json is absent."""
+        from pipeline.lib.run_manager import inspect_run
+        run_dir = self._make_run(tmp_path, stages={})
+        # Remove metadata file entirely
+        (run_dir / "run_metadata.json").unlink()
+        detail = inspect_run(run_dir)
+        assert detail.deploy_stages == {}

@@ -128,3 +128,77 @@ def list_runs(workspace_dir: Path, setup_config_path: Path) -> "list[RunSummary]
             active=(name == active_run),
         ))
     return results
+
+
+def _phase_notes(name: str, info: dict) -> str:
+    """Extract human-readable notes from a phase info dict."""
+    if name == "translate":
+        parts = []
+        if "review_rounds" in info:
+            parts.append(f"{info['review_rounds']} review rounds")
+        if "consensus" in info:
+            parts.append(f"consensus {info['consensus']}")
+        return ", ".join(parts)
+    if name == "baseline_derivation":
+        if info.get("user_approved"):
+            return "user approved"
+    if name == "assembly":
+        pkgs = info.get("packages", [])
+        if pkgs:
+            return f"packages: {', '.join(pkgs)}"
+    return ""
+
+
+def inspect_run(run_dir: Path, active_run: str = "") -> RunDetail:
+    """Load full run detail. Raises RunNotFoundError if run_dir doesn't exist or is invalid."""
+    if not run_dir.exists():
+        raise RunNotFoundError(f"Error: run '{run_dir.name}' not found in workspace/runs/")
+    state = _load_state(run_dir)
+    if state is None:
+        raise RunNotFoundError(f"Error: run '{run_dir.name}' has no valid .state.json")
+
+    meta = _load_metadata(run_dir)
+
+    phases = []
+    for name, info in state.get("phases", {}).items():
+        if not isinstance(info, dict):
+            continue
+        phases.append(PhaseInfo(
+            name=name,
+            status=info.get("status", ""),
+            notes=_phase_notes(name, info),
+            verdict=info.get("verdict", ""),
+        ))
+
+    files_created: list[str] = []
+    files_modified: list[str] = []
+    to_path = run_dir / "translation_output.json"
+    if to_path.exists():
+        try:
+            to = json.loads(to_path.read_text())
+            files_created = to.get("files_created") or []
+            files_modified = to.get("files_modified") or []
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    deploy_stages: dict[str, str] = {}
+    deploy_last_step = ""
+    if meta:
+        for stage_name, stage_info in meta.get("stages", {}).items():
+            if isinstance(stage_info, dict):
+                deploy_stages[stage_name] = stage_info.get("status", "")
+                if stage_name == "deploy":
+                    deploy_last_step = stage_info.get("last_completed_step", "")
+            else:
+                deploy_stages[stage_name] = str(stage_info)
+
+    return RunDetail(
+        name=state["run_name"],
+        scenario=state["scenario"],
+        active=(state["run_name"] == active_run),
+        phases=phases,
+        files_created=files_created,
+        files_modified=files_modified,
+        deploy_stages=deploy_stages,
+        deploy_last_step=deploy_last_step,
+    )
