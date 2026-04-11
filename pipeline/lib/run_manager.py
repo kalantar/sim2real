@@ -202,3 +202,125 @@ def inspect_run(run_dir: Path, active_run: str = "") -> RunDetail:
         deploy_stages=deploy_stages,
         deploy_last_step=deploy_last_step,
     )
+
+
+def _load_translation_output(run_dir: Path, run_name: str) -> "tuple[list[str], list[str]]":
+    """Load and validate translation_output.json. Returns (files_created, files_modified)."""
+    to_path = run_dir / "translation_output.json"
+    if not to_path.exists():
+        raise TranslationOutputError(
+            f"Error: run '{run_name}' has no translation_output.json — was Phase 3 completed?"
+        )
+    try:
+        data = json.loads(to_path.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        raise TranslationOutputError(
+            f"Error: translation_output.json is malformed — {e}"
+        )
+    fc = data.get("files_created")
+    fm = data.get("files_modified")
+    if (not isinstance(fc, list) or not isinstance(fm, list)
+            or not all(isinstance(x, str) for x in fc)
+            or not all(isinstance(x, str) for x in fm)):
+        raise TranslationOutputError(
+            "Error: translation_output.json is malformed — expected 'files_created' and "
+            "'files_modified' as lists of strings"
+        )
+    return fc, fm
+
+
+def _git_dirty_default(submodule_dir: Path, paths: "list[str]") -> "list[str]":
+    """Return paths that have uncommitted tracked changes in the submodule."""
+    dirty = []
+    for rel_path in paths:
+        result = subprocess.run(
+            ["git", "-C", str(submodule_dir), "status", "--porcelain", rel_path],
+            capture_output=True, text=True,
+        )
+        line = result.stdout.strip()
+        # '??' prefix = untracked; not considered dirty for our purposes
+        if line and not line.startswith("??"):
+            dirty.append(rel_path)
+    return dirty
+
+
+def switch_run(
+    run_name: str,
+    workspace_dir: Path,
+    submodule_dir: Path,
+    setup_config_path: Path,
+    confirm_fn: "callable",
+    _check_dirty: "callable | None" = None,
+) -> SwitchResult:
+    """
+    Switch the active run: validate, copy generated files to submodule, update setup_config.
+
+    confirm_fn(dirty_files: list[str]) -> bool  — called when dirty files found; return True to proceed.
+    _check_dirty(submodule_dir, paths) -> list[str]  — injectable for tests; defaults to git status.
+
+    Raises: RunNotFoundError, TranslationOutputError, ValueError, SwitchAborted, OSError.
+    """
+    if _check_dirty is None:
+        _check_dirty = _git_dirty_default
+
+    run_dir = workspace_dir / "runs" / run_name
+
+    # Step 1: validate and load
+    if not run_dir.exists():
+        raise RunNotFoundError(f"Error: run '{run_name}' not found in workspace/runs/")
+    if not setup_config_path.exists():
+        raise RunNotFoundError("Error: workspace/setup_config.json not found")
+
+    files_created, files_modified = _load_translation_output(run_dir, run_name)
+    target_files = files_created + files_modified
+
+    # Step 2: basename collision check
+    seen: set[str] = set()
+    for rel_path in target_files:
+        basename = Path(rel_path).name
+        if basename in seen:
+            raise ValueError(
+                f"Error: basename collision in translation_output.json: "
+                f"'{basename}' maps to multiple paths"
+            )
+        seen.add(basename)
+
+    # Step 3: pre-validate all source files
+    generated_dir = run_dir / "generated"
+    missing = [Path(f).name for f in target_files
+               if not (generated_dir / Path(f).name).exists()]
+    if missing:
+        raise ValueError(
+            f"Error: missing source files in workspace/runs/{run_name}/generated/: "
+            + ", ".join(missing)
+        )
+
+    # Step 4: check submodule exists
+    if not submodule_dir.exists():
+        raise RunNotFoundError(
+            "Error: submodule directory llm-d-inference-scheduler not found"
+        )
+
+    # Step 5: dirty check (immediately before copy)
+    dirty = _check_dirty(submodule_dir, target_files)
+    if dirty and not confirm_fn(dirty):
+        raise SwitchAborted()
+
+    # Step 6: copy files
+    files_written: list[str] = []
+    for rel_path in target_files:
+        src = generated_dir / Path(rel_path).name
+        dst = submodule_dir / rel_path
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copy2(src, dst)
+            files_written.append(rel_path)
+        except OSError as e:
+            raise OSError(f"Error: failed to copy {rel_path}: {e}") from e
+
+    # Step 7: update setup_config only after all copies succeed
+    cfg = json.loads(setup_config_path.read_text())
+    cfg["current_run"] = run_name
+    setup_config_path.write_text(json.dumps(cfg, indent=2))
+
+    return SwitchResult(files_written=files_written, active_run=run_name)

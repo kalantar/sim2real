@@ -341,3 +341,240 @@ class TestInspectRun:
         (run_dir / "run_metadata.json").unlink()
         detail = inspect_run(run_dir)
         assert detail.deploy_stages == {}
+
+
+class TestSwitchRun:
+    def _setup(self, tmp_path, run_name="adaptive6",
+               files_created=None, files_modified=None,
+               generated_files=None, active_run="other"):
+        """
+        Set up a minimal workspace + submodule for switch_run tests.
+
+        generated_files: list of basenames to create in workspace/runs/<run>/generated/.
+                         Defaults to basenames of files_created + files_modified.
+        """
+        ws = tmp_path / "workspace"
+        run_dir = ws / "runs" / run_name
+        run_dir.mkdir(parents=True)
+
+        fc = files_created or []
+        fm = files_modified or ["pkg/plugins/scorer/adaptive_v2.go"]
+        _write_state(run_dir, run_name, "routing",
+                     {"gate": {"status": "done", "verdict": "READY TO DEPLOY"}})
+        _write_meta(run_dir, {"setup": {"status": "completed"}})
+        _write_translation_output(run_dir, fc, fm)
+
+        # Create source files in generated/
+        gen_dir = run_dir / "generated"
+        gen_dir.mkdir()
+        all_targets = fc + fm
+        for rel_path in (generated_files if generated_files is not None
+                         else [Path(p).name for p in all_targets]):
+            (gen_dir / rel_path).write_text(f"// content of {rel_path}")
+
+        # Submodule dir (not a real git repo — dirty check is injected)
+        sub_dir = tmp_path / "llm-d-inference-scheduler"
+        sub_dir.mkdir()
+        for rel_path in all_targets:
+            dst = sub_dir / rel_path
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_text("// old content")
+
+        _write_setup(ws, active_run)
+        cfg = ws / "setup_config.json"
+        return ws, sub_dir, cfg, run_dir
+
+    # ── Happy path ────────────────────────────────────────────────────────────
+
+    def test_copies_files_and_updates_setup_config(self, tmp_path):
+        from pipeline.lib.run_manager import switch_run, SwitchResult
+        ws, sub_dir, cfg, run_dir = self._setup(tmp_path,
+            files_modified=["pkg/plugins/scorer/adaptive_v2.go"])
+
+        result = switch_run("adaptive6", ws, sub_dir, cfg,
+                            confirm_fn=lambda _: True,
+                            _check_dirty=lambda d, ps: [])
+
+        assert isinstance(result, SwitchResult)
+        assert "pkg/plugins/scorer/adaptive_v2.go" in result.files_written
+        assert result.active_run == "adaptive6"
+
+        dst = sub_dir / "pkg/plugins/scorer/adaptive_v2.go"
+        assert dst.read_text() == "// content of adaptive_v2.go"
+
+        cfg_data = json.loads(cfg.read_text())
+        assert cfg_data["current_run"] == "adaptive6"
+
+    def test_setup_config_only_updated_after_all_copies_succeed(self, tmp_path):
+        """setup_config.json must NOT be updated if a copy fails."""
+        import shutil as _shutil
+        from unittest.mock import patch
+        from pipeline.lib.run_manager import switch_run
+        ws, sub_dir, cfg, run_dir = self._setup(tmp_path,
+            files_modified=["pkg/plugins/scorer/adaptive_v2.go"])
+
+        with patch("pipeline.lib.run_manager.shutil.copy2", side_effect=OSError("disk full")):
+            with pytest.raises(OSError):
+                switch_run("adaptive6", ws, sub_dir, cfg,
+                           confirm_fn=lambda _: True,
+                           _check_dirty=lambda d, ps: [])
+
+        cfg_data = json.loads(cfg.read_text())
+        assert cfg_data["current_run"] == "other"
+
+    def test_partial_copy_failure_leaves_written_files_in_place(self, tmp_path):
+        """Files written before a mid-flight failure must not be rolled back."""
+        import shutil as _shutil
+        from unittest.mock import patch
+        from pipeline.lib.run_manager import switch_run
+        ws, sub_dir, cfg, run_dir = self._setup(tmp_path,
+            files_created=["pkg/plugins/scorer/adaptive_v2_test.go"],
+            files_modified=["pkg/plugins/scorer/adaptive_v2.go"])
+
+        call_count = [0]
+        real_copy2 = _shutil.copy2
+        def copy2_fail_on_second(src, dst):
+            call_count[0] += 1
+            if call_count[0] >= 2:
+                raise OSError("disk full")
+            return real_copy2(src, dst)
+
+        with patch("pipeline.lib.run_manager.shutil.copy2", side_effect=copy2_fail_on_second):
+            with pytest.raises(OSError):
+                switch_run("adaptive6", ws, sub_dir, cfg,
+                           confirm_fn=lambda _: True,
+                           _check_dirty=lambda d, ps: [])
+
+        # First file written must still be present (not rolled back)
+        written = list((sub_dir / "pkg/plugins/scorer").glob("*.go"))
+        assert len(written) >= 1
+
+    def test_dirty_check_receives_submodule_relative_paths(self, tmp_path):
+        """_check_dirty must be called with the submodule-relative paths, not basenames."""
+        from pipeline.lib.run_manager import switch_run
+        ws, sub_dir, cfg, _ = self._setup(tmp_path,
+            files_created=["pkg/plugins/scorer/adaptive_v2_test.go"],
+            files_modified=["pkg/plugins/scorer/adaptive_v2.go"])
+
+        received = {}
+        def capture_dirty(d, ps):
+            received["submodule_dir"] = d
+            received["paths"] = list(ps)
+            return []
+
+        switch_run("adaptive6", ws, sub_dir, cfg,
+                   confirm_fn=lambda _: True,
+                   _check_dirty=capture_dirty)
+
+        assert received["submodule_dir"] == sub_dir
+        assert "pkg/plugins/scorer/adaptive_v2_test.go" in received["paths"]
+        assert "pkg/plugins/scorer/adaptive_v2.go" in received["paths"]
+
+    # ── Validation: run not found ─────────────────────────────────────────────
+
+    def test_raises_run_not_found(self, tmp_path):
+        from pipeline.lib.run_manager import switch_run, RunNotFoundError
+        ws = tmp_path / "workspace"
+        ws.mkdir()
+        _write_setup(ws, "")
+        sub_dir = tmp_path / "llm-d-inference-scheduler"
+        sub_dir.mkdir()
+        cfg = ws / "setup_config.json"
+        with pytest.raises(RunNotFoundError, match="not found"):
+            switch_run("nope", ws, sub_dir, cfg,
+                       confirm_fn=lambda _: True,
+                       _check_dirty=lambda d, ps: [])
+
+    # ── Validation: translation_output.json ──────────────────────────────────
+
+    def test_raises_if_translation_output_missing(self, tmp_path):
+        from pipeline.lib.run_manager import switch_run, TranslationOutputError
+        ws, sub_dir, cfg, run_dir = self._setup(tmp_path)
+        (run_dir / "translation_output.json").unlink()
+        with pytest.raises(TranslationOutputError, match="Phase 3"):
+            switch_run("adaptive6", ws, sub_dir, cfg,
+                       confirm_fn=lambda _: True,
+                       _check_dirty=lambda d, ps: [])
+
+    def test_raises_if_translation_output_malformed(self, tmp_path):
+        from pipeline.lib.run_manager import switch_run, TranslationOutputError
+        ws, sub_dir, cfg, run_dir = self._setup(tmp_path)
+        (run_dir / "translation_output.json").write_text(json.dumps({"files_created": "not a list"}))
+        with pytest.raises(TranslationOutputError, match="malformed"):
+            switch_run("adaptive6", ws, sub_dir, cfg,
+                       confirm_fn=lambda _: True,
+                       _check_dirty=lambda d, ps: [])
+
+    # ── Validation: basename collision ────────────────────────────────────────
+
+    def test_raises_on_basename_collision(self, tmp_path):
+        from pipeline.lib.run_manager import switch_run
+        ws, sub_dir, cfg, run_dir = self._setup(
+            tmp_path,
+            files_created=["pkg/a/foo.go"],
+            files_modified=["pkg/b/foo.go"],  # same basename 'foo.go'
+            generated_files=["foo.go"],
+        )
+        with pytest.raises(ValueError, match="basename collision"):
+            switch_run("adaptive6", ws, sub_dir, cfg,
+                       confirm_fn=lambda _: True,
+                       _check_dirty=lambda d, ps: [])
+
+    # ── Validation: missing source file ──────────────────────────────────────
+
+    def test_raises_if_source_file_missing(self, tmp_path):
+        from pipeline.lib.run_manager import switch_run
+        ws, sub_dir, cfg, run_dir = self._setup(
+            tmp_path,
+            files_modified=["pkg/plugins/scorer/adaptive_v2.go"],
+            generated_files=[],  # deliberately empty
+        )
+        with pytest.raises(ValueError, match="missing source files"):
+            switch_run("adaptive6", ws, sub_dir, cfg,
+                       confirm_fn=lambda _: True,
+                       _check_dirty=lambda d, ps: [])
+
+    # ── Validation: submodule not found ──────────────────────────────────────
+
+    def test_raises_if_submodule_missing(self, tmp_path):
+        from pipeline.lib.run_manager import switch_run, RunNotFoundError
+        ws, sub_dir, cfg, run_dir = self._setup(tmp_path)
+        import shutil
+        shutil.rmtree(sub_dir)
+        with pytest.raises(RunNotFoundError, match="submodule"):
+            switch_run("adaptive6", ws, sub_dir, cfg,
+                       confirm_fn=lambda _: True,
+                       _check_dirty=lambda d, ps: [])
+
+    # ── Dirty file handling ───────────────────────────────────────────────────
+
+    def test_dirty_files_confirmed_proceeds(self, tmp_path):
+        from pipeline.lib.run_manager import switch_run
+        ws, sub_dir, cfg, _ = self._setup(tmp_path)
+        confirmed = []
+        def confirm(dirty):
+            confirmed.extend(dirty)
+            return True
+
+        result = switch_run("adaptive6", ws, sub_dir, cfg,
+                            confirm_fn=confirm,
+                            _check_dirty=lambda d, ps: ["pkg/plugins/scorer/adaptive_v2.go"])
+        assert len(confirmed) == 1
+        assert result is not None
+
+    def test_dirty_files_declined_raises_switch_aborted(self, tmp_path):
+        from pipeline.lib.run_manager import switch_run, SwitchAborted
+        ws, sub_dir, cfg, _ = self._setup(tmp_path)
+        with pytest.raises(SwitchAborted):
+            switch_run("adaptive6", ws, sub_dir, cfg,
+                       confirm_fn=lambda _: False,
+                       _check_dirty=lambda d, ps: ["pkg/plugins/scorer/adaptive_v2.go"])
+
+    def test_dirty_declined_does_not_modify_setup_config(self, tmp_path):
+        from pipeline.lib.run_manager import switch_run, SwitchAborted
+        ws, sub_dir, cfg, _ = self._setup(tmp_path, active_run="other")
+        with pytest.raises(SwitchAborted):
+            switch_run("adaptive6", ws, sub_dir, cfg,
+                       confirm_fn=lambda _: False,
+                       _check_dirty=lambda d, ps: ["pkg/plugins/scorer/adaptive_v2.go"])
+        assert json.loads(cfg.read_text())["current_run"] == "other"
