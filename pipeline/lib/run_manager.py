@@ -94,3 +94,37 @@ def _get_verdict(phases: dict) -> str:
         if isinstance(info, dict) and "verdict" in info:
             return info["verdict"]
     return ""
+
+
+def list_runs(workspace_dir: Path, setup_config_path: Path) -> "list[RunSummary]":
+    """Return RunSummary for each conforming run, sorted by name. Non-conforming runs are silently skipped."""
+    runs_dir = workspace_dir / "runs"
+    if not runs_dir.exists():
+        return []
+
+    active_run = ""
+    if setup_config_path.exists():
+        try:
+            cfg = json.loads(setup_config_path.read_text())
+            active_run = cfg.get("current_run", "")
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    results = []
+    for run_dir in sorted(runs_dir.iterdir()):
+        if not run_dir.is_dir():
+            continue
+        state = _load_state(run_dir)
+        meta = _load_metadata(run_dir)
+        if state is None or meta is None:
+            continue  # silently skip non-conforming
+        name = state["run_name"]
+        phases = state.get("phases", {})
+        results.append(RunSummary(
+            name=name,
+            scenario=state["scenario"],
+            last_phase=_last_done_phase(phases),
+            verdict=_get_verdict(phases),
+            active=(name == active_run),
+        ))
+    return results

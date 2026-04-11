@@ -118,3 +118,91 @@ class TestPhaseHelpers:
         from pipeline.lib.run_manager import _get_verdict
         phases = {"gate": {"status": "done"}}
         assert _get_verdict(phases) == ""
+
+
+class TestListRuns:
+    def _setup(self, tmp_path, runs, active_run=""):
+        """Create workspace with given runs. Each run: (name, scenario, phases, stages)."""
+        ws = tmp_path / "workspace"
+        ws.mkdir()
+        for name, scenario, phases, stages in runs:
+            run_dir = ws / "runs" / name
+            _write_state(run_dir, name, scenario, phases)
+            _write_meta(run_dir, stages)
+        _write_setup(ws, active_run)
+        return ws, ws / "setup_config.json"
+
+    def test_returns_conforming_runs_only(self, tmp_path):
+        from pipeline.lib.run_manager import list_runs
+        ws, cfg = self._setup(tmp_path, [
+            ("run1", "routing", {"gate": {"status": "done", "verdict": "READY TO DEPLOY"}},
+             {"setup": {"status": "completed"}}),
+        ], active_run="run1")
+        # add a non-conforming run dir (missing run_name key)
+        bad_dir = ws / "runs" / "oldrun"
+        bad_dir.mkdir(parents=True)
+        (bad_dir / ".state.json").write_text(json.dumps({"scenario": "x", "phases": {}}))
+        (bad_dir / "run_metadata.json").write_text(json.dumps({"version": 1, "stages": {}}))
+
+        results = list_runs(ws, cfg)
+        assert len(results) == 1
+        assert results[0].name == "run1"
+
+    def test_active_flag_set_correctly(self, tmp_path):
+        from pipeline.lib.run_manager import list_runs
+        ws, cfg = self._setup(tmp_path, [
+            ("run1", "routing", {"gate": {"status": "done", "verdict": "PASS"}},
+             {"setup": {"status": "completed"}}),
+            ("run2", "routing", {"gate": {"status": "done"}},
+             {"setup": {"status": "completed"}}),
+        ], active_run="run2")
+
+        results = list_runs(ws, cfg)
+        by_name = {r.name: r for r in results}
+        assert not by_name["run1"].active
+        assert by_name["run2"].active
+
+    def test_verdict_extracted_from_gate_phase(self, tmp_path):
+        from pipeline.lib.run_manager import list_runs
+        ws, cfg = self._setup(tmp_path, [
+            ("run1", "routing", {
+                "init": {"status": "done"},
+                "gate": {"status": "done", "verdict": "READY TO DEPLOY"},
+             }, {"setup": {"status": "completed"}}),
+        ], active_run="")
+        results = list_runs(ws, cfg)
+        assert results[0].verdict == "READY TO DEPLOY"
+        assert results[0].last_phase == "gate"
+
+    def test_empty_workspace_returns_empty_list(self, tmp_path):
+        from pipeline.lib.run_manager import list_runs
+        ws = tmp_path / "workspace"
+        (ws / "runs").mkdir(parents=True)
+        _write_setup(ws, "")
+        assert list_runs(ws, ws / "setup_config.json") == []
+
+    def test_missing_runs_dir_returns_empty_list(self, tmp_path):
+        from pipeline.lib.run_manager import list_runs
+        ws = tmp_path / "workspace"
+        ws.mkdir()
+        _write_setup(ws, "")
+        assert list_runs(ws, ws / "setup_config.json") == []
+
+    def test_skips_non_directory_entries(self, tmp_path):
+        from pipeline.lib.run_manager import list_runs
+        ws, cfg = self._setup(tmp_path, [
+            ("run1", "routing", {"gate": {"status": "done"}}, {"setup": {"status": "completed"}}),
+        ])
+        (ws / "runs" / "stray_file.txt").write_text("not a run")
+        results = list_runs(ws, cfg)
+        assert len(results) == 1
+
+    def test_results_sorted_by_name(self, tmp_path):
+        from pipeline.lib.run_manager import list_runs
+        ws, cfg = self._setup(tmp_path, [
+            ("zebra", "routing", {"gate": {"status": "done"}}, {"setup": {"status": "completed"}}),
+            ("apple", "routing", {"gate": {"status": "done"}}, {"setup": {"status": "completed"}}),
+            ("mango", "routing", {"gate": {"status": "done"}}, {"setup": {"status": "completed"}}),
+        ])
+        results = list_runs(ws, cfg)
+        assert [r.name for r in results] == ["apple", "mango", "zebra"]
