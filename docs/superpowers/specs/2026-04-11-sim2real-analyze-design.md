@@ -70,7 +70,8 @@ Only rows where `status == "ok"` are included in metric computation.
   from TPOT aggregation. If **no** rows remain after filtering (all rows have `output_tokens ≤ 1`),
   skip all TPOT rows for that workload and print a warning to stderr:
   `Warning: skipping TPOT for workload '<name>' — no rows with output_tokens > 1`
-  (where `<name>` is the on-disk directory name, e.g. `workload_fm8_short_output_highrate`)
+  (where `<name>` is the on-disk directory name, e.g. `workload_fm8_short_output_highrate`).
+  The workload table section is still printed, with only the 6 TTFT and E2E rows (no TPOT rows).
 - **E2E** = `(last_chunk_time_us - send_time_us) / 1000`
 
 Aggregates: mean, p50 (median), p99 per workload per phase.
