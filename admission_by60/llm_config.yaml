@@ -2,8 +2,8 @@
 # All values from BLIS defaults.yaml — trained on real vLLM traces
 
 model:
-  id: qwen/qwen2.5-7b-instruct
-  hf_repo: Qwen/Qwen2.5-7B-Instruct
+  id: qwen/qwen3-32b
+  hf_repo: Qwen/Qwen3-32B
 
 hardware:
   gpu: H100
@@ -18,11 +18,18 @@ serving:
 # vLLM-equivalent parameters (from BLIS defaults.yaml, measured on real vLLM)
 vllm_config:
   total_kv_blocks: 67659          # Measured from real vLLM on H100 TP=1
-  block_size_in_tokens: 16        # vLLM default
+  block_size_in_tokens: 64        # Match EPP precise-prefix-cache-scorer tokenProcessorConfig.blockSize
   max_num_running_reqs: 256       # vLLM default (max concurrent requests in batch)
   max_num_scheduled_tokens: 2048  # Chunked prefill threshold
-  max_model_len: 0                # Unlimited (model's native context window)
-  gpu_memory_utilization: 0.90    # Typical vLLM default
+  max_model_len: 36000                # Unlimited (model's native context window)
+  gpu_memory_utilization: 0.95    # Typical vLLM default
+  kv_events_config: |-
+    {
+      "enable_kv_cache_events": true,
+      "publisher": "zmq",
+      "endpoint": "tcp://$(GAIE_RELEASE_NAME_POSTFIX)-gaie-epp.$(NAMESPACE).svc.cluster.local:5557",
+      "topic": "kv@$(POD_IP):8000@Qwen/Qwen3-32B"
+    }
 
 # Latency model: blackbox (trained alpha/beta regression on real vLLM traces)
 latency_model:

@@ -18,7 +18,7 @@ is self-contained, and let the two copies evolve independently.
 
 ### `pipeline/lib/values.py`
 
-Owns all YAML deep-merge logic. Ported verbatim from `tools/transfer_cli.py`.
+Owns all YAML deep-merge logic. **Copy-paste verbatim from `tools/transfer_cli.py`** — do not abstract or refactor. `tools/` will be removed in a future cleanup; `pipeline/` becomes the authoritative copy.
 
 **Module-level imports:** `import copy`, `import yaml` (at module level, not inside functions).
 
@@ -84,7 +84,7 @@ except (FileNotFoundError, yaml.YAMLError, ValueError, OSError) as e:
 
 ### `pipeline/lib/tekton.py`
 
-Thin shim ported from `tools/transfer_cli.py:cmd_compile_pipeline`.
+**Copy-paste verbatim from `tools/transfer_cli.py:cmd_compile_pipeline`**, converted from a CLI handler to a callable function.
 
 **Module-level constant:**
 

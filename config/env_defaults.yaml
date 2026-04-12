@@ -1,100 +1,236 @@
-stack:
-  gateway:
-    helmValues:
-      gateway:
-        provider: istio
-        gatewayClassName: istio
-        gatewayParameters:
-          resources:
-            limits:
-              cpu: '16'
-              memory: 16Gi
-            requests:
-              cpu: '4'
-              memory: 4Gi
-          istio:
-            accessLogging: false
-  model:
-    vllm_image: ghcr.io/llm-d/llm-d-cuda:v0.5.1
-    helmValues:
-      modelArtifacts:
-        authSecretName: hf-secret
-      routing:
-        servicePort: 8000
-      prefill:
-        create: false
-      decode:
-        create: true
-        acceleratorTypes:
-          labelKey: nvidia.com/gpu.product
-        affinity:
-          nodeAffinity:
-            requiredDuringSchedulingIgnoredDuringExecution:
-              nodeSelectorTerms:
-              - matchExpressions:
-                - key: kubernetes.io/hostname
-                  operator: NotIn
-                  values:
-                  - pokprod-b93r39s0
-        containers:
-        - modelCommand: vllmServe
-          mountModelVolume: true
-  gaie:
-    inferenceObjectives:
-    - name: critical
-      priority: 100
-    - name: standard
-      priority: 0
-    - name: sheddable
-      priority: -10
-    - name: batch
-      priority: -50
-    epp_image:
-      upstream:
-        hub: ghcr.io/llm-d
-        name: llm-d-inference-scheduler
-        tag: latest
-        pullPolicy: IfNotPresent
-      build:
-        hub: ghcr.io/kalantar
-        name: llm-d-inference-scheduler
-        tag: admin6
-        platform: linux/amd64
-        pullPolicy: Always
-    shared:
+common:
+  observe:
+    request_multiplier: 10
+  build:
+    commands:
+    - - go
+      - build
+      - ./...
+    - - go
+      - vet
+      - ./...
+  stack:
+    gateway:
       helmValues:
-        inferenceExtension:
-          pluginsConfigFile: custom-plugins.yaml
-          flags:
-            v: 5
-        provider:
-          name: istio
-        istio:
-          destinationRule:
-            trafficPolicy:
-              connectionPool:
-                http:
-                  http1MaxPendingRequests: 256000
-                  maxRequestsPerConnection: 256000
-                  http2MaxRequests: 256000
-                  idleTimeout: 900s
-                tcp:
-                  maxConnections: 256000
-                  maxConnectionDuration: 1800s
-                  connectTimeout: 900s
-    baseline:
+        gateway:
+          provider: istio
+          gatewayClassName: istio
+          gatewayParameters:
+            resources:
+              limits:
+                cpu: '16'
+                memory: 16Gi
+              requests:
+                cpu: '4'
+                memory: 4Gi
+            istio:
+              accessLogging: false
+    model:
+      vllm_image: ghcr.io/llm-d/llm-d-cuda:v0.6.0
       helmValues:
-        inferenceExtension:
-          pluginsCustomConfig:
-            custom-plugins.yaml: "apiVersion: inference.networking.x-k8s.io/v1alpha1\n\
-              kind: EndpointPickerConfig\nplugins:\n- type: load-aware-scorer\n- type:\
-              \ decode-filter\n- type: max-score-picker\n- type: single-profile-handler\n\
-              schedulingProfiles:\n- name: default\n  plugins:\n  - pluginRef: decode-filter\n\
-              \  - pluginRef: max-score-picker\n  - pluginRef: load-aware-scorer\n\
-              \    weight: 1\n"
-observe:
-  noise_runs: 5
-  request_multiplier: 10
-pipeline:
-  fast_iteration: true
-  sleepDuration: 30s
+        modelArtifacts:
+          authSecretName: hf-secret
+        routing:
+          servicePort: 8000
+        prefill:
+          create: false
+        decode:
+          create: true
+          extraConfig:
+            affinity:
+              nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                  - matchExpressions:
+                    - key: nvidia.com/gpu.product
+                      operator: In
+                      values:
+                      - NVIDIA-H100-80GB-HBM3
+                    - key: kubernetes.io/hostname
+                      operator: NotIn
+                      values:
+                      - pokprod-b93r39s0
+                      - pokprod-b93r43s2
+          containers:
+          - modelCommand: vllmServe
+            mountModelVolume: true
+            env:
+            - name: GAIE_RELEASE_NAME_POSTFIX  # index 0 matters because of set in helmfile
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace  # assumed to be the same as the EPP's
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: status.podIP
+            - name: TRITON_CACHE_DIR
+              value: /tmp/.triton-cache
+            extraConfig:
+              startupProbe:
+                httpGet:
+                  path: /health
+                  port: 8200
+                failureThreshold: 60
+                initialDelaySeconds: 30
+                periodSeconds: 10
+              readinessProbe:
+                httpGet:
+                  path: /health
+                  port: 8200
+                failureThreshold: 3
+                periodSeconds: 5
+    gaie:
+      epp_image:
+        upstream:
+          hub: ghcr.io/llm-d
+          name: llm-d-inference-scheduler
+          tag: latest
+          pullPolicy: IfNotPresent
+        build:
+          hub: ghcr.io/kalantar
+          name: llm-d-inference-scheduler
+          tag: adaptive6
+          platform: linux/amd64
+          pullPolicy: Always
+scenarios:
+  routing:
+    target:
+      repo: llm-d-inference-scheduler
+    config:
+      kind: EndpointPickerConfig
+      helm_path: gaie.treatment.helmValues.inferenceExtension.pluginsCustomConfig.custom-plugins.yaml
+    stack:
+      gaie:
+        shared:
+          helmValues:
+            inferenceExtension:
+              pluginsConfigFile: custom-plugins.yaml
+              flags:
+                v: 5
+              monitoring:
+                interval: 5s
+            provider:
+              name: istio
+            istio:
+              destinationRule:
+                trafficPolicy:
+                  connectionPool:
+                    http:
+                      http1MaxPendingRequests: 256000
+                      maxRequestsPerConnection: 256000
+                      http2MaxRequests: 256000
+                      idleTimeout: 900s
+                    tcp:
+                      maxConnections: 256000
+                      maxConnectionDuration: 1800s
+                      connectTimeout: 900s
+        baseline:
+          helmValues:
+            inferenceExtension:
+              pluginsCustomConfig:
+                custom-plugins.yaml: "apiVersion: inference.networking.x-k8s.io/v1alpha1\n\
+                  kind: EndpointPickerConfig\nplugins:\n- type: load-aware-scorer\n\
+                  - type: decode-filter\n- type: max-score-picker\n- type: single-profile-handler\n\
+                  schedulingProfiles:\n- name: default\n  plugins:\n  - pluginRef:\
+                  \ decode-filter\n  - pluginRef: max-score-picker\n  - pluginRef:\
+                  \ load-aware-scorer\n    weight: 1\n"
+  admission_control:
+    target:
+      repo: llm-d-inference-scheduler
+    config:
+      kind: AdmissionPolicyConfig
+      helm_path: gaie.treatment.admissionPolicy
+    stack:
+      gaie:
+        inferenceObjectives:
+        - name: critical
+          priority: 100
+        - name: standard
+          priority: 0
+        - name: sheddable
+          priority: -10
+        - name: batch
+          priority: -50
+        baseline:
+          helmValues: {}
+  adaptive-routing:
+    target:
+      repo: llm-d-inference-scheduler
+    config:
+      kind: EndpointPickerConfig
+      helm_path: gaie.treatment.helmValues.inferenceExtension.pluginsCustomConfig.custom-plugins.yaml
+    stack:
+      gaie:
+        shared:
+          helmValues:
+            inferenceExtension:
+              image:
+                hub: ghcr.io/llm-d
+                name: llm-d-inference-scheduler
+                tag: v0.7.1
+                pullPolicy: Always
+              pluginsConfigFile: custom-plugins.yaml
+              flags:
+                v: 5
+              monitoring:
+                interval: 5s
+              extProcPort: 9002
+              extraContainerPorts:
+                - name: zmq
+                  containerPort: 5557
+                  protocol: TCP
+              extraServicePorts:
+                - name: zmq
+                  port: 5557
+                  targetPort: 5557
+                  protocol: TCP
+              env:
+                - name: HF_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: hf-secret
+                      key: HF_TOKEN
+              sidecar:
+                enabled: true
+                image: ghcr.io/llm-d/llm-d-uds-tokenizer:v0.7.1
+                imagePullPolicy: IfNotPresent
+                name: tokenizer-uds
+                configMap:
+                  name: tokenizer-uds-config
+                  data:
+                    placeholder: ""
+                env:
+                  - name: TOKENIZERS_DIR
+                    value: /tokenizers
+                  - name: HF_HOME
+                    value: /tokenizers
+                volumeMounts:
+                  - mountPath: /tokenizers
+                    name: tokenizers
+                  - mountPath: /tmp/tokenizer
+                    name: tokenizer-uds
+              volumes:
+                - name: tokenizers
+                  emptyDir: {}
+                - name: tokenizer-uds
+                  emptyDir: {}
+              volumeMounts:
+                - mountPath: /tmp/tokenizer
+                  name: tokenizer-uds
+            provider:
+              name: istio
+            istio:
+              destinationRule:
+                trafficPolicy:
+                  connectionPool:
+                    http:
+                      http1MaxPendingRequests: 256000
+                      maxRequestsPerConnection: 256000
+                      http2MaxRequests: 256000
+                      idleTimeout: 900s
+                    tcp:
+                      maxConnections: 256000
+                      maxConnectionDuration: 1800s
+                      connectTimeout: 900s

@@ -1,0 +1,83 @@
+kind: sim2real-transfer
+version: 2
+
+scenario: routing
+
+algorithm:
+  source: sim2real_golden/routers/router_adaptive_expanded.go
+  config: sim2real_golden/routers/policy_adaptive_expanded.yaml
+
+baseline:
+  config: sim2real_golden/routers/policy_baseline_211.yaml
+
+workloads:
+  - sim2real_golden/workloads/workload_fm3_burst.yaml
+  - sim2real_golden/workloads/workload_fm2a_groups_gt_instances.yaml
+
+llm_config: sim2real_golden/llm_config.yaml
+
+context:
+  notes: |
+    ## Routers
+
+    ### Baseline 2:1:1 (llm-d default)
+
+    Static weighted scoring: `precise-prefix-cache:2, queue-depth:1, kv-utilization:1`.
+    Uses stock BLIS `routing.go` — no file swap needed.
+
+    **In plain English:** Every request gets routed to the instance with the best
+    fixed-weight combination of "has my prefix cached" (weight 2) and "isn't too
+    busy" (weight 1). The weights never change regardless of what's happening.
+
+    **The problem:** Because the cache score is weighted 2x, it dominates. When many
+    requests share a prefix, they all pile onto the one instance that cached it.
+    The queue-depth signal updates every 5 seconds — too slow to push back against
+    a sudden flood. The result is one overloaded instance and three idle ones.
+
+    ### Adaptive-v2 (3-scorer regime detection)
+
+    Replaces `WeightedScoring.Route()` with per-request regime detection using 3
+    scorers: `precise-prefix-cache`, `load-aware`, `kv-utilization`.
+
+    **In plain English:** Instead of fixed weights, this router looks at the current
+    state of the cluster before each request and picks one of three strategies:
+    - If cache hits are spread unevenly across instances, lean into cache affinity
+      (send the request where its prefix lives).
+    - If memory is running low (>70% KV cache used), ignore the cache entirely and
+      just balance load — prevents piling onto a nearly-full instance.
+    - Otherwise, just spread load evenly.
+
+    **What it exploits that baseline misses:** The baseline blindly trusts a stale
+    cache signal. Adaptive-v2 *checks whether the cache signal is worth following*
+    before using it — and backs off to load-balancing when it isn't.
+
+    **Regimes:**
+    - **Cache-affinity** (cache spread > 0.1): ppc:4, load-aware:1 — lean into cache
+      locality when prefix hits vary across instances
+    - **Memory-aware** (avg KV util > 0.7): load-aware:1, kvu:1 — disable prefix
+      affinity under memory pressure to prevent pile-on
+    - **Load-balance** (default): load-aware:1 — weak cache signal, just balance load
+
+    **Key insight:** `load-aware` reads `QueueDepth` with threshold cap at 128
+    (llm-d's load-aware-scorer semantics), replacing the stale-prone min-max
+    `queue-depth` scorer in the baseline.
+
+    ### Adaptive-expanded / Golden (5-scorer regime detection)
+
+    Same regime detection as v2 but with two additional load signals:
+    `active-requests` (synchronous InFlightRequests) and `running-requests`
+    (min-max on BatchSize).
+
+    **In plain English:** Same adaptive regime switching as v2, but with more eyes
+    on the load. v2 only knows how deep each queue is. Expanded also knows how
+    many requests are in-flight (dispatched but not queued yet) and how many are
+    actively running in each batch. More load signals = finer-grained decisions,
+    especially under bursty traffic where in-flight count reacts instantly while
+    queue depth lags behind.
+
+    **Regimes:**
+    - **Cache-affinity**: ppc:4, active-requests:1, load-aware:1
+    - **Memory-aware**: active-requests:2, load-aware:1, running-requests:1, kvu:1
+    - **Load-balance**: active-requests:2, load-aware:1, running-requests:1
+
+    Bigger TTFT wins on prefix-heavy workloads but slight FM-5 regression vs v2.

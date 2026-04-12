@@ -5,39 +5,65 @@ Pipeline for transferring simulation-discovered routing algorithms from [inferen
 ## Quick Start
 
 ```bash
+git submodule update --init --recursive
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Run stages using prompt templates in `prompts/`. Use `prompts/transfer.md` as the orchestrator, or execute stages individually:
+The pipeline has four entry points:
 
-| Stage | Prompt | Output |
-|-------|--------|--------|
-| 1 Extract | `prompts/extract.md` | `workspace/algorithm_summary.json` |
-| 2 Translate | `prompts/translate.md` | `workspace/signal_coverage.json` |
-| 3 Generate | `prompts/generate.md` | Go scorer plugin source |
-| 3.5 Validate Translation | `prompts/validate-translation.md` | `workspace/translation_validation.json` |
-| 4 Test | `prompts/test.md` | Build + test pass |
-| 4.5 Equivalence Gate | `prompts/equivalence-gate.md` | `workspace/equivalence_results.json` |
-| 4.75 Build & Push | `prompts/build-push.md` | Treatment EPP image in registry |
-| 5 Validate | `prompts/validate.md` | `workspace/validation_results.json` |
-| 6 PR | `prompts/pr.md` | PRs in llm-d repos + calibration log |
+| Script | Purpose |
+|--------|---------|
+| `pipeline/setup.py` | One-time cluster bootstrap (namespace, RBAC, secrets, PVCs, Tekton) |
+| `pipeline/prepare.py` | 6-phase state machine: context → translate → assembly → gate |
+| `pipeline/deploy.py` | Build EPP image, submit Tekton packages, collect results |
+| `pipeline/run.py` | List, inspect, and switch between runs |
 
-**Input:** Evolved algorithm in `blis_router/best/` (EVOLVE-BLOCK from inference-sim evolutionary optimization).
+**Environment variables** (set before running any pipeline script):
+
+| Variable | Used by | Description |
+|----------|---------|-------------|
+| `HF_TOKEN` | `setup.py` | HuggingFace API token for model image pull |
+| `QUAY_ROBOT_USERNAME` + `QUAY_ROBOT_TOKEN` | `setup.py` | Quay robot credentials (use this **or** GitHub) |
+| `GITHUB_TOKEN` | `setup.py` | GitHub PAT (`write:packages`) for ghcr.io (use this **or** Quay) |
+| `NAMESPACE` | `setup.py`, `deploy.py` | Kubernetes namespace (falls back to value saved by setup) |
+
+All of these can also be passed as `--flags` to `setup.py` — run `python pipeline/setup.py --help` to see all options. `deploy.py` reads `NAMESPACE` from the saved setup config if the env var is not set.
+
+**Typical flow:**
+
+```bash
+# 1. One-time cluster setup
+python pipeline/setup.py
+
+# 2. Prepare: runs phases 1–6; pauses at phase 3 for AI translation (/sim2real-translate)
+python pipeline/prepare.py
+
+# 3. Deploy to cluster and collect results
+python pipeline/deploy.py
+python pipeline/deploy.py collect
+
+# 4. Manage runs
+python pipeline/run.py list
+python pipeline/run.py inspect <run-name>
+python pipeline/run.py switch <run-name>
+```
+
+Run `python pipeline/<script>.py --help` for full options on any entry point.
 
 ## Tests
 
 ```bash
-python -m pytest tools/ -v
+python -m pytest pipeline/ -v
 ```
 
-See `CLAUDE.md` for CLI reference, artifact contracts, and exit code semantics.
+See `CLAUDE.md` for artifact contracts and exit code semantics.
 
 > For help when things go wrong, see [Troubleshooting](docs/contributing/troubleshooting.md).
 
-## Stage 4.75 Prerequisites (Build & Push EPP Image)
+## Prerequisites
 
-Stage 4.75 (`prompts/build-push.md`) builds the treatment EPP image and pushes it to a container registry. Before running it, complete these one-time steps:
+### EPP image registry (`pipeline/deploy.py`)
 
 **Configure your registry hub** in `config/env_defaults.yaml`:
 ```yaml
@@ -48,36 +74,10 @@ stack:
         hub: ghcr.io/<your-org>   # e.g. ghcr.io/kalantar
 ```
 
-**Create a GitHub PAT** with `write:packages` scope and log in to the registry:
+**Log in to the registry** (requires a GitHub PAT with `write:packages`):
 ```bash
 echo $GITHUB_PAT | podman login ghcr.io -u <your-github-username> --password-stdin
 # or: docker login ghcr.io
 ```
 
-**Container runtime** (`podman` or `docker`) must be on `PATH`.
-
-## Stage 5 Prerequisites (Cluster Benchmarks)
-
-Stage 5 (`prompts/validate.md`) submits Tekton pipelines to a production cluster. Before running it, verify:
-
-**Environment variable**
-```bash
-export NAMESPACE=<your-namespace>   # Kubernetes namespace where pipelines run
-```
-
-**Python setup**
-```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt     # includes PyYAML and jinja2, required by Stage 5
-```
-
-**Cluster setup**
-
-| Requirement | Verify with |
-|-------------|-------------|
-| `kubectl` context points to the correct cluster | `kubectl config current-context` |
-| `tkn` (Tekton CLI) installed | `tkn version` |
-| Tekton operator installed on cluster | `kubectl get pods -n tekton-pipelines` |
-| PVC named `data-pvc` exists in `$NAMESPACE` | `kubectl get pvc data-pvc -n $NAMESPACE` |
-
-See `blis_router/CLUSTER.md` for the exact hardware and cluster configuration required to reproduce the simulation environment.
+`podman` or `docker` must be on `PATH`.

@@ -1,0 +1,33 @@
+kind: sim2real-transfer
+version: 2
+
+scenario: routing
+
+algorithm:
+  source: sim2real_golden/routers/router_adaptive_v2.go
+  config: sim2real_golden/routers/policy_adaptive_v2.yaml
+
+baseline:
+  config: sim2real_golden/routers/policy_baseline_211.yaml
+
+workloads:
+  - sim2real_golden/workloads/workload_fm2a_groups_gt_instances.yaml
+  - sim2real_golden/workloads/workload_fm3_burst.yaml
+
+llm_config: sim2real_golden/llm_config.yaml
+
+context:
+  files:
+    - docs/transfer/blis_to_llmd_mapping.md
+  notes: |
+    Adaptive-v2 uses per-request regime detection:
+      cache-affinity (cacheSpread > 0.1): weight PPC highest
+      memory-aware (avgKVUtil > 0.7): weight load-aware + kv-util
+      load-balance (default): load-aware only
+
+    The production scorer should implement the Scorer interface.
+    Use load_aware.go as a reference for how scorers work.
+    The plugin must be registered in register.go.
+
+    Prefer multi-profile EndpointPickerConfig with a custom
+    ProfileHandler over modifying the core scoring loop.

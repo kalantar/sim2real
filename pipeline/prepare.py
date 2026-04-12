@@ -30,7 +30,7 @@ from pipeline.lib.manifest import load_manifest, ManifestError
 from pipeline.lib.state_machine import StateMachine
 from pipeline.lib.context_builder import build_context
 from pipeline.lib.values import _deep_merge, merge_values
-from pipeline.lib.tekton import compile_pipeline, make_experiment_pipeline, make_pipelinerun
+from pipeline.lib.tekton import compile_pipeline, make_experiment_pipeline, make_phase_pipeline
 
 # ── Repo layout ──────────────────────────────────────────────────────────────
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -301,6 +301,28 @@ def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
     _generate_algorithm_values(manifest, resolved, alg_values_path)
     ok(f"Algorithm values: {alg_values_path.relative_to(REPO_ROOT)}")
 
+    # 4c.5: Re-inject EPP image if one was already built for this run
+    meta_path = run_dir / "run_metadata.json"
+    if meta_path.exists():
+        meta = json.loads(meta_path.read_text())
+        epp_image = meta.get("epp_image", "")
+        if epp_image:
+            # epp_image is "hub/name:tag" — split on last colon for tag, then last slash for hub
+            tag = epp_image.rsplit(":", 1)[-1] if ":" in epp_image else ""
+            repo = epp_image.rsplit(":", 1)[0] if ":" in epp_image else epp_image
+            name = repo.rsplit("/", 1)[-1] if "/" in repo else repo
+            hub = repo.rsplit("/", 1)[0] if "/" in repo else ""
+            alg_values = yaml.safe_load(alg_values_path.read_text())
+            (alg_values
+                .setdefault("stack", {})
+                .setdefault("gaie", {})
+                .setdefault("treatment", {})
+                .setdefault("helmValues", {})
+                .setdefault("inferenceExtension", {})
+                ["image"]) = {"hub": hub, "name": name, "tag": tag, "pullPolicy": "Always"}
+            alg_values_path.write_text(yaml.dump(alg_values, default_flow_style=False, allow_unicode=True))
+            ok(f"EPP image re-injected: {epp_image}")
+
     # 4d: Merge values
     values_path = run_dir / "values.yaml"
     try:
@@ -333,6 +355,16 @@ def _generate_algorithm_values(manifest: dict, resolved: dict, out_path: Path):
     """Generate algorithm_values.yaml from manifest + resolved config."""
     llm_config_path = REPO_ROOT / manifest["llm_config"]
     llm_config = yaml.safe_load(llm_config_path.read_text())
+
+    # Support both flat format (model_name/model_uri) and nested format (model.hf_repo/model.id)
+    _model_block = llm_config.get("model", {})
+    if "model_name" not in llm_config:
+        llm_config["model_name"] = _model_block.get("hf_repo") or _model_block.get("id", "")
+    if "model_uri" not in llm_config:
+        hf_repo = _model_block.get("hf_repo") or _model_block.get("id", "")
+        llm_config["model_uri"] = f"hf://{hf_repo}" if hf_repo else ""
+    if "vllm_args" not in llm_config:
+        llm_config["vllm_args"] = llm_config.get("vllm_config", {})
 
     # Parse workloads
     workloads = []
@@ -371,12 +403,42 @@ def _generate_algorithm_values(manifest: dict, resolved: dict, out_path: Path):
     if vllm_image:
         alg_values["stack"]["model"]["vllmImage"] = vllm_image
 
-    # Add vLLM args from llm_config
-    vllm_args = llm_config.get("vllm_args", {})
-    if vllm_args:
-        alg_values["stack"]["model"]["helmValues"] = {
-            "decode": {"containers": [{"args": vllm_args}]}
-        }
+    # Translate BLIS vllm_config params to vLLM CLI flags for the helm chart.
+    # The chart expects containers[].args as a list of "--flag=value" strings.
+    # Mapping per blis_router/CLUSTER.md and the deployment comment in llm_config.yaml.
+    # total_kv_blocks is a calibration reference only — not a vLLM CLI flag.
+    # max_model_len: 0 means "unlimited (model native)" in BLIS — omit the flag.
+    _BLIS_TO_VLLM_FLAG = {
+        "gpu_memory_utilization":   "--gpu-memory-utilization",
+        "block_size_in_tokens":     "--block-size",
+        "max_num_running_reqs":     "--max-num-seqs",
+        "max_num_scheduled_tokens": "--max-num-batched-tokens",
+        "max_model_len":            "--max-model-len",
+        "kv_events_config":         "--kv-events-config",
+    }
+    vllm_config_raw = llm_config.get("vllm_args", {})
+    tp = llm_config.get("serving", {}).get("tensor_parallelism", 1)
+    replicas = llm_config.get("cluster", {}).get("num_instances", 1)
+    vllm_args_list: list[str] = []
+    if tp is not None and int(tp) > 1:
+        vllm_args_list.append(f"--tensor-parallel-size={int(tp)}")
+    for blis_key, cli_flag in _BLIS_TO_VLLM_FLAG.items():
+        val = vllm_config_raw.get(blis_key)
+        if val is None:
+            continue
+        if blis_key == "max_model_len" and val == 0:
+            continue
+        vllm_args_list.append(f"{cli_flag}={val}")
+    decode_block: dict = {"replicas": replicas}
+    # Set GAIE_RELEASE_NAME_POSTFIX so the kv-events-config endpoint resolves correctly.
+    # The EPP service is named sim2real-{run_name}-gaie-epp by the Tekton deploy-gaie task.
+    run_name = out_path.parent.name
+    container_entry: dict = {"env": [{"name": "GAIE_RELEASE_NAME_POSTFIX",
+                                      "value": f"sim2real-{run_name}"}]}
+    if vllm_args_list:
+        container_entry["args"] = vllm_args_list
+    decode_block["containers"] = [container_entry]
+    alg_values["stack"]["model"]["helmValues"] = {"decode": decode_block}
 
     # Embed treatment EPP config based on treatment_config_generated flag
     output_path = out_path.parent / "translation_output.json"
@@ -483,12 +545,30 @@ def _compile_cluster_packages(run_dir: Path, resolved: dict, values_path: Path,
             pr_path.write_text(f"# PipelineRun stub for {package}\n"
                                f"# tektonc-data-collection not available\n")
 
-        # Load compiled pipeline for the experiment combiner
+        # Load compiled pipeline for the experiment combiner and per-package pipelineruns
         if pr_path.exists() and not pr_path.read_text().startswith("#"):
             try:
                 compiled_pipelines[package] = yaml.safe_load(pr_path.read_text())
             except Exception:
                 pass
+
+        # Remove any stale per-workload pipelineruns from earlier pipeline versions
+        for stale in pkg_dir.glob("pipelinerun-workload-*.yaml"):
+            stale.unlink()
+
+        # Generate a single sequential Pipeline + PipelineRun for standalone package execution
+        if package in compiled_pipelines:
+            phase_pipeline, phase_pr = make_phase_pipeline(
+                package, workloads, compiled_pipelines[package],
+                run_name, namespace,
+                workspace_bindings=setup_config.get("workspaces"),
+            )
+            (pkg_dir / f"sim2real-{package}-pipeline.yaml").write_text(
+                yaml.dump(phase_pipeline, default_flow_style=False, allow_unicode=True)
+            )
+            (pkg_dir / f"pipelinerun-{package}.yaml").write_text(
+                yaml.dump(phase_pr, default_flow_style=False, allow_unicode=True)
+            )
 
     # Generate the single sequential experiment pipeline (all baselines then all
     # treatments, one after another). This replaces the per-workload PipelineRuns.
@@ -500,7 +580,8 @@ def _compile_cluster_packages(run_dir: Path, resolved: dict, values_path: Path,
                for i, wl in enumerate(workloads)]
         )
         experiment_pipeline, experiment_pr = make_experiment_pipeline(
-            phase_workloads, compiled_pipelines, run_name, namespace
+            phase_workloads, compiled_pipelines, run_name, namespace,
+            workspace_bindings=setup_config.get("workspaces"),
         )
         exp_dir = cluster_dir / "experiment"
         exp_dir.mkdir(parents=True, exist_ok=True)

@@ -7,7 +7,7 @@
 version: "1"
 seed: 42
 category: language
-aggregate_rate: 320
+aggregate_rate: 600
 num_requests: 19200     # 60s at 320 req/s (2.0x calibrated saturation)
 
 clients:
