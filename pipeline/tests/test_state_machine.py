@@ -1,7 +1,6 @@
 """Tests for phase state machine."""
 import json
 import pytest
-from pathlib import Path
 
 from pipeline.lib.state_machine import StateMachine
 

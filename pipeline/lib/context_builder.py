@@ -39,7 +39,7 @@ def build_context(
     sha_summary = " | ".join(
         f"{k}@{v[:7]}" for k, v in sorted(submodule_shas.items())
     )
-    lines = [f"# Translation Context", f"Scenario: {scenario} | {sha_summary}", ""]
+    lines = ["# Translation Context", f"Scenario: {scenario} | {sha_summary}", ""]
     for f in context_files:
         lines.append(f"## {f}")
         lines.append(f.read_text())

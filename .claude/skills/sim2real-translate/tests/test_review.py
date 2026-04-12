@@ -1,5 +1,4 @@
 """Tests for review.py — consensus logic, JSON extraction, prompt building."""
-import json
 import sys
 from pathlib import Path
 import pytest

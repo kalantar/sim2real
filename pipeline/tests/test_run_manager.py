@@ -407,7 +407,6 @@ class TestSwitchRun:
 
     def test_setup_config_only_updated_after_all_copies_succeed(self, tmp_path):
         """setup_config.json must NOT be updated if a copy fails."""
-        import shutil as _shutil
         from unittest.mock import patch
         from pipeline.lib.run_manager import switch_run
         ws, sub_dir, cfg, run_dir = self._setup(tmp_path,

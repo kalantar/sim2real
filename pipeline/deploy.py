@@ -11,7 +11,7 @@ import os
 import subprocess
 import sys
 import yaml
-from datetime import datetime, timezone
+
 from pathlib import Path
 
 # Ensure repo root is on sys.path when run as a script (python pipeline/deploy.py)
@@ -170,7 +170,7 @@ def _print_status(submitted: dict[str, str], namespace: str):
     for pkg, pr_name in sorted(submitted.items()):
         print(f"    {pkg:20s} → {pr_name}")
     print(f"\n  Check status:  kubectl get pipelineruns -n {namespace}")
-    print(f"  Collect:       python pipeline/deploy.py collect")
+    print("  Collect:       python pipeline/deploy.py collect")
     print()
 
 
@@ -451,7 +451,7 @@ def _cmd_collect(args, manifest: dict, run_dir: Path, setup_config: dict):
     if collected:
         dirs = "  ".join(f"deploy_{p}_log/" for p in collected)
         print(f"  Results:   {run_dir.relative_to(REPO_ROOT)}/{dirs}")
-        print(f"\n  Next:      /sim2real-analyze")
+        print("\n  Next:      /sim2real-analyze")
     print()
 
 

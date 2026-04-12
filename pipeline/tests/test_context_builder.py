@@ -1,6 +1,5 @@
 """Tests for context builder."""
 import pytest
-from pathlib import Path
 
 from pipeline.lib.context_builder import build_context, compute_context_hash
 

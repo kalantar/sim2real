@@ -1,9 +1,7 @@
 """Tests for pipeline.lib.tekton module."""
-import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 
 def test_returns_false_when_tektonc_absent(tmp_path):

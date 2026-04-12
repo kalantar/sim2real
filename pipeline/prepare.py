@@ -264,8 +264,8 @@ def _phase_translate(args, state: StateMachine, manifest: dict, run_dir: Path,
     print("  TRANSLATION CHECKPOINT")
     print(f"{'='*60}")
     print(f"\n  skill_input.json written to: {skill_input_path.relative_to(REPO_ROOT)}")
-    print(f"\n  Next step: run the /sim2real-translate skill in Claude Code,")
-    print(f"  then re-run: python pipeline/prepare.py")
+    print("\n  Next step: run the /sim2real-translate skill in Claude Code,")
+    print("  then re-run: python pipeline/prepare.py")
     if hits >= 3:
         warn(f"Checkpoint hit {hits} times. Have you run the translation skill?")
     print(f"\n{'='*60}\n")
@@ -710,7 +710,7 @@ def _phase_summary(state: StateMachine, manifest: dict, run_dir: Path, resolved:
     cluster_dir = run_dir / "cluster"
     exp_pr = cluster_dir / "experiment" / "pipelinerun-experiment.yaml"
     if exp_pr.exists():
-        lines.append(f"- `experiment/` — pipelinerun-experiment.yaml (sequential)")
+        lines.append("- `experiment/` — pipelinerun-experiment.yaml (sequential)")
     elif cluster_dir.exists():
         for pkg_dir in sorted(cluster_dir.iterdir()):
             if pkg_dir.is_dir() and any(pkg_dir.glob("pipelinerun-*.yaml")):
