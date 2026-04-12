@@ -68,8 +68,9 @@ Only rows where `status == "ok"` are included in metric computation.
 - **TPOT** = `(last_chunk_time_us - first_chunk_time_us) / (output_tokens - 1) / 1000`
   — computed only for rows where `output_tokens > 1`; rows with ≤1 output token are excluded
   from TPOT aggregation. If **no** rows remain after filtering (all rows have `output_tokens ≤ 1`),
-  skip all TPOT rows for that workload and print a warning:
+  skip all TPOT rows for that workload and print a warning to stderr:
   `Warning: skipping TPOT for workload '<name>' — no rows with output_tokens > 1`
+  (where `<name>` is the on-disk directory name, e.g. `workload_fm8_short_output_highrate`)
 - **E2E** = `(last_chunk_time_us - send_time_us) / 1000`
 
 Aggregates: mean, p50 (median), p99 per workload per phase.
@@ -104,10 +105,14 @@ Printed to stdout and **always overwritten** to
 - `Metric`: left-aligned, 14 chars
 - `Baseline`, `Treatment`: right-aligned, 9 chars, 1 decimal place
 - `Delta(ms)`: right-aligned, 9 chars, 1 decimal place, `+` prefix for positive values
-- `Change`: right-aligned pct with sign, then `(better)` / `(worse)` / `(no change)`
+- `Change`: free-width, 6 spaces of padding after `Delta(ms)`, then `{pct:+.1f}% ({verdict})`
   — percentage = `(treatment - baseline) / baseline * 100`, rounded to 1 decimal place
   — for latency metrics, negative pct = better (lower latency); positive pct = worse
-  — display "no change" when rounded value is exactly `0.0`
+  — display `(no change)` when rounded pct is exactly `0.0`
+  — if `baseline == 0.0`, display `N/A` for the percentage column
+
+Separator line uses Unicode U+2500 (`─`) repeated 64 times with 2-space indent to match header width.
+Row format string: `f"  {metric:<14}{baseline:>9.1f}{treatment:>9.1f}{delta:>+9.1f}      {change}"`
 
 Blank line between workload sections. No blank line before the first section.
 
@@ -118,7 +123,9 @@ Blank line between workload sections. No blank line before the first section.
 | `deploy_baseline_log/` or `deploy_treatment_log/` missing entirely | Exit 1: `Error: need both deploy_baseline_log/ and deploy_treatment_log/ — run 'pipeline/deploy.py collect' first` |
 | Workload dir present in baseline but not treatment (or vice versa) | Skip that workload, print to stderr: `Warning: skipping workload '<name>' — not present in both phases` |
 | No workloads found in common between both phases | Exit 1: `Error: no workloads found in both baseline and treatment logs` |
-| CSV missing required columns | Exit 1: `Error: <path>: missing required columns: <col1>, <col2>` |
+| CSV missing required columns | Exit 1: `Error: <path>: missing required columns: <col1>, <col2>` (comma-space separated list) |
+| CSV is malformed or unparseable | Exit 1: `Error: <path>: failed to parse CSV` |
+| CSV is empty (no header) | Exit 1: `Error: <path>: empty or invalid CSV file` |
 | CSV has no rows with `status == "ok"` | Skip that workload, print to stderr: `Warning: skipping workload '<name>' — no rows with status == "ok"` |
 | `workspace/setup_config.json` missing and `--run` not provided | Exit 1: `Error: no run specified — use --run NAME or set current_run in workspace/setup_config.json` |
 
@@ -154,6 +161,11 @@ argument to override.
 If `current_run` names a run whose directory does not exist under `workspace/runs/`, warn the
 user (`Warning: run '<name>' not found`) and fall back to the directory listing prompt.
 
+Fallback behavior when listing runs:
+- If `workspace/runs/` does not exist: stop with `Error: workspace/runs/ not found — no runs available`
+- If `workspace/runs/` is empty: stop with `Error: no runs found in workspace/runs/`
+- Otherwise: display a numbered list of available run names and prompt `Enter run name:`
+
 **Step 2 — Ask**
 
 Prompt the user:
@@ -179,9 +191,10 @@ After showing the table (or if the user jumped directly to a request), ask:
 What would you like to analyze next? (or 'done' to exit)
 ```
 
-For each user request, the skill writes a self-contained Python script to a temp file under
-`/tmp/` and executes it via Bash. The skill sees the script's stdout/stderr and reports results
-to the user. The skill loop retains memory of what has been generated in the session so far
+For each user request, the skill writes a self-contained Python script to a temp file named
+`/tmp/sim2real_analyze_{8-char hex}.py` (unique per request) and executes it via Bash. The file
+is deleted after execution. The skill sees the script's stdout/stderr and reports results to the
+user. The skill loop retains memory of what has been generated in the session so far
 (e.g., "show me that last chart again" works).
 
 **What the script can do:**
@@ -194,7 +207,8 @@ to the user. The skill loop retains memory of what has been generated in the ses
 - Print custom tables to stdout
 
 The skill creates `workspace/runs/<name>/results_charts/` if it does not already exist before
-writing any chart or report file.
+writing any chart or report file. If directory creation fails, surface the OS error to the user
+and continue the interactive loop (skip the current request).
 
 **After each script runs:**
 - For PNG outputs: report the path to the user (`Saved: workspace/runs/<name>/results_charts/...`)
@@ -273,6 +287,7 @@ Key test cases for `compute_table.py`:
 - TPOT with some rows where `output_tokens <= 1` — those rows excluded, valid rows aggregated correctly
 - TPOT where all rows have `output_tokens <= 1` — TPOT rows skipped with warning
 - Single-row workload (only 1 `status == "ok"` row) — percentile falls back to the single value
+- Baseline metric is 0.0 — percentage displayed as `N/A`
 - `--run` argument overrides `current_run` in setup_config.json
 - Existing `deploy_comparison_table.txt` is overwritten
 
