@@ -50,8 +50,7 @@ This approach requires no cluster-level changes, no modifications to the EPP con
 
 ```sh
 RESULTS_DIR="/workspace/data/$(params.resultsDir)"
-PHASE_DIR="${RESULTS_DIR%/*}"           # strips workload name → .../baseline
-LOG_DIR="${PHASE_DIR}/epp_logs"         # shared across workloads in the phase
+LOG_DIR="${RESULTS_DIR}/epp_logs"          # inside the workload directory
 SENTINEL="${RESULTS_DIR}/epp_stream_done"  # per-workload → no collision between workloads
 ```
 
@@ -122,22 +121,29 @@ SENTINEL="${RESULTS_DIR}/epp_stream_done"  # per-workload → no collision betwe
 
 ### Log file layout
 
-All EPP log files for a phase land in a single flat directory, shared by all workloads:
+EPP log files live inside the workload results directory, matching the existing layout where per-workload decode logs and trace files already reside:
 
 ```
-<runName>/<phase>/epp_logs/
-  <pod-name>_HH{bucket:02d}.log
+<runName>/<phase>/<workloadName>/
+  epp_logs/
+    <pod-name>_HH{bucket:02d}.log
+  <pod-name>_tokenizer-uds.log      ← existing (non-epp containers, unchanged)
+  <decode-pod>_vllm.log             ← existing decode logs
+  trace_header.yaml
+  trace_data.csv
 ```
 
-Example (5-minute windows, UTC, EPP pod for `adaptive6` baseline):
+Example (5-minute windows, UTC, `adaptive6` baseline `fm3_burst`):
 
 ```
-sim2real-adaptive6-gaie-epp-997dbb5f7-hpp7x_2325.log   # 23:25–23:29
-sim2real-adaptive6-gaie-epp-997dbb5f7-hpp7x_2330.log   # 23:30–23:34
-sim2real-adaptive6-gaie-epp-997dbb5f7-hpp7x_2335.log   # 23:35–23:39
+workload_fm3_burst/
+  epp_logs/
+    sim2real-adaptive6-gaie-epp-6dc8d58d99-r46pm_2325.log   # 23:25–23:29
+    sim2real-adaptive6-gaie-epp-6dc8d58d99-r46pm_2330.log   # 23:30–23:34
+    sim2real-adaptive6-gaie-epp-6dc8d58d99-r46pm_2335.log   # 23:35–23:39
 ```
 
-Since workloads run sequentially (different wall-clock times), time buckets naturally do not collide across workloads. If multiple EPP replicas are running, each pod produces its own files in the same directory.
+Each workload group deploys a fresh EPP pod with a new random suffix, so `epp_logs/` files are always distinct across workloads. If multiple EPP replicas are running, each pod produces its own files in the same `epp_logs/` subdirectory.
 
 ### Modified task: `collect-results`
 
@@ -224,28 +230,32 @@ race ahead of `stream-epp-logs`.
 | `kubectl logs` exits with API server error | Background process dies; sentinel poll detects all processes gone and exits 0 |
 | `windowMinutes` is 0 or non-integer | Script validates the param at startup; logs an error and exits 0 with no streaming |
 | `epp_logs/` directory cannot be created (PVC issue) | `mkdir -p` fails; script logs error and exits 0 (non-fatal) |
-| Two workloads produce the same UTC hour bucket | Each workload group deploys a fresh EPP pod with a new random-suffix pod name (deploy-gaie runs per group, delete-gaie runs at end of each group). File names include the pod name, so files from different workload groups are always distinct even if they land in the same time bucket. |
+| Two workloads produce the same UTC hour bucket | Not an issue: each workload has its own `epp_logs/` directory inside its workload results dir, so files from different workloads never share a directory. |
 
 ### Impact on `deploy.py` / results collection
 
-`_extract_phase_from_pvc` copies the entire `${runName}/${phase}/` tree from the PVC. The `epp_logs/` directory is already within that tree and is collected automatically with no changes to `deploy.py`.
+`_extract_phase_from_pvc` copies the entire `${runName}/${phase}/` tree from the PVC. The per-workload `epp_logs/` directories are already within that tree and are collected automatically with no changes to `deploy.py`.
 
-After collection, the local layout is:
+After collection, the local layout matches the existing structure with `epp_logs/` added inside each workload directory:
 
 ```
 run_dir/deploy_baseline_log/
-  epp_logs/
-    sim2real-adaptive6-gaie-epp-997dbb5f7-hpp7x_2325.log
-    sim2real-adaptive6-gaie-epp-997dbb5f7-hpp7x_2330.log
   workload_fm3_burst/
+    epp_logs/
+      sim2real-adaptive6-gaie-epp-6dc8d58d99-r46pm_2325.log
+      sim2real-adaptive6-gaie-epp-6dc8d58d99-r46pm_2330.log
+    sim2real-adaptive6-gaie-epp-6dc8d58d99-r46pm_tokenizer-uds.log
+    sim2real-adaptive6-decode-*_vllm.log
     trace_header.yaml
     trace_data.csv
-    epp_stream_done          ← sentinel (harmless, can be ignored)
-  workload_overload/
-    ...
+    epp_stream_done          ← sentinel (small empty file, can be ignored)
+  workload_fm5_short_output/
+    epp_logs/
+      sim2real-adaptive6-gaie-epp-6dc8d58d99-v55ml_2340.log
+      ...
 ```
 
-`epp_logs/` files sort lexicographically into chronological order. The `epp_stream_done` sentinel files in workload subdirectories are small empty files and can be ignored.
+`epp_logs/` files sort lexicographically into chronological order.
 
 ## Files Changed
 
