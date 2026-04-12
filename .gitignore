@@ -6,6 +6,7 @@ docs/plans/scratch/
 tmp/
 actions-runner/
 # temporary
+.claude/worktrees/
 .claude/convergence-state/
 .claude/skills/convergence-review/
 *-review.md

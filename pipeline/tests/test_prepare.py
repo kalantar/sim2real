@@ -1017,9 +1017,12 @@ class TestCompileClusterPackages:
         assert not (run_dir / "cluster" / "baseline" / "epp.yaml").exists()
         assert not (run_dir / "cluster" / "treatment" / "epp.yaml").exists()
 
-    def test_pipelinerun_yaml_per_workload(self, repo):
-        """One pipelinerun-{name}.yaml per workload per package."""
+    def test_pipelinerun_yaml_per_phase(self, repo):
+        """One pipelinerun-{phase}.yaml per package (baseline and treatment)."""
+        from unittest.mock import patch as _patch
         mod = _import_prepare_with_root(repo)
+        # Create tektonc_dir so the compile_pipeline branch is taken
+        (repo / "tektonc-data-collection" / "tektoncsample" / "sim2real").mkdir(parents=True)
         run_dir = repo / "workspace" / "runs" / "test-run"
         run_dir.mkdir(parents=True, exist_ok=True)
         values_path = run_dir / "values.yaml"
@@ -1033,15 +1036,39 @@ class TestCompileClusterPackages:
         }))
         setup_config = {"namespace": "test-ns"}
 
-        mod._compile_cluster_packages(run_dir, {}, values_path, setup_config)
+        _MINIMAL_PIPELINE = {
+            "apiVersion": "tekton.dev/v1", "kind": "Pipeline",
+            "metadata": {"name": "test-pipeline"},
+            "spec": {
+                "params": [
+                    {"name": "workloadName", "type": "string"},
+                    {"name": "workloadSpec", "type": "string"},
+                ],
+                "tasks": [{"name": "run-task", "taskRef": {"name": "t"},
+                            "params": [{"name": "workloadName",
+                                        "value": "$(params.workloadName)"}]}],
+            },
+        }
+
+        def _fake_compile(template_dir, values_path, phase, out_dir):
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / f"{phase}-pipeline.yaml").write_text(
+                yaml.dump(_MINIMAL_PIPELINE, default_flow_style=False)
+            )
+            return True
+
+        with _patch.object(mod, "compile_pipeline", side_effect=_fake_compile):
+            mod._compile_cluster_packages(run_dir, {}, values_path, setup_config)
 
         for phase in ["baseline", "treatment"]:
-            assert (run_dir / "cluster" / phase / "pipelinerun-bursty.yaml").exists()
-            assert (run_dir / "cluster" / phase / "pipelinerun-steady.yaml").exists()
+            assert (run_dir / "cluster" / phase / f"pipelinerun-{phase}.yaml").exists()
 
     def test_pipelinerun_content_is_valid_k8s(self, repo):
         """PipelineRun YAML is a valid Tekton PipelineRun resource."""
+        from unittest.mock import patch as _patch
         mod = _import_prepare_with_root(repo)
+        # Create tektonc_dir so the compile_pipeline branch is taken
+        (repo / "tektonc-data-collection" / "tektoncsample" / "sim2real").mkdir(parents=True)
         run_dir = repo / "workspace" / "runs" / "my-run"
         run_dir.mkdir(parents=True, exist_ok=True)
         values_path = run_dir / "values.yaml"
@@ -1050,13 +1077,35 @@ class TestCompileClusterPackages:
         }))
         setup_config = {"namespace": "myns"}
 
-        mod._compile_cluster_packages(run_dir, {}, values_path, setup_config)
+        _MINIMAL_PIPELINE = {
+            "apiVersion": "tekton.dev/v1", "kind": "Pipeline",
+            "metadata": {"name": "test-pipeline"},
+            "spec": {
+                "params": [
+                    {"name": "workloadName", "type": "string"},
+                    {"name": "workloadSpec", "type": "string"},
+                ],
+                "tasks": [{"name": "run-task", "taskRef": {"name": "t"},
+                            "params": [{"name": "workloadName",
+                                        "value": "$(params.workloadName)"}]}],
+            },
+        }
 
-        pr_path = run_dir / "cluster" / "baseline" / "pipelinerun-wl1.yaml"
+        def _fake_compile(template_dir, values_path, phase, out_dir):
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / f"{phase}-pipeline.yaml").write_text(
+                yaml.dump(_MINIMAL_PIPELINE, default_flow_style=False)
+            )
+            return True
+
+        with _patch.object(mod, "compile_pipeline", side_effect=_fake_compile):
+            mod._compile_cluster_packages(run_dir, {}, values_path, setup_config)
+
+        pr_path = run_dir / "cluster" / "baseline" / "pipelinerun-baseline.yaml"
         pr = yaml.safe_load(pr_path.read_text())
         assert pr["apiVersion"] == "tekton.dev/v1"
         assert pr["kind"] == "PipelineRun"
         assert pr["metadata"]["namespace"] == "myns"
         params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
-        assert params["workloadName"] == "wl1"
+        assert params["workloadName-baseline-wl1"] == "wl1"
         assert params["namespace"] == "myns"
