@@ -52,6 +52,7 @@ python .claude/skills/sim2real-analyze/scripts/compute_table.py --run <name>
 (e.g. `workload_fm8_short_output_highrate`). The display name shown in the table strips the
 `workload_` prefix and converts underscores to hyphens (e.g. `fm8-short-output-highrate`).
 The `--run` argument, warning messages, and error messages use the on-disk directory name as-is.
+Subdirectories that do not start with `workload_` are silently ignored (no warning).
 
 ### Required CSV columns
 
@@ -72,6 +73,12 @@ Only rows where `status == "ok"` are included in metric computation.
 - **E2E** = `(last_chunk_time_us - send_time_us) / 1000`
 
 Aggregates: mean, p50 (median), p99 per workload per phase.
+
+**Aggregation implementation:**
+- Mean: `statistics.mean(values)`
+- p50/p99: `statistics.quantiles(values, n=100, method='exclusive')` →
+  `result[49]` for p50, `result[98]` for p99.
+  Requires at least 2 values; if only 1 value is present use it directly for all percentiles.
 
 ### Output format
 
@@ -98,8 +105,9 @@ Printed to stdout and **always overwritten** to
 - `Baseline`, `Treatment`: right-aligned, 9 chars, 1 decimal place
 - `Delta(ms)`: right-aligned, 9 chars, 1 decimal place, `+` prefix for positive values
 - `Change`: right-aligned pct with sign, then `(better)` / `(worse)` / `(no change)`
-  — for latency metrics, negative delta = better (lower latency)
-  — "no change" when delta rounds to 0.0%
+  — percentage = `(treatment - baseline) / baseline * 100`, rounded to 1 decimal place
+  — for latency metrics, negative pct = better (lower latency); positive pct = worse
+  — display "no change" when rounded value is exactly `0.0`
 
 Blank line between workload sections. No blank line before the first section.
 
@@ -142,6 +150,9 @@ user-invocable: true
 Read `current_run` from `workspace/setup_config.json`. If absent or empty, list available
 run directories under `workspace/runs/` and ask the user to pick one. Accept `--run <name>`
 argument to override.
+
+If `current_run` names a run whose directory does not exist under `workspace/runs/`, warn the
+user (`Warning: run '<name>' not found`) and fall back to the directory listing prompt.
 
 **Step 2 — Ask**
 
@@ -259,8 +270,9 @@ Key test cases for `compute_table.py`:
 - One log directory missing — exit 1
 - CSV missing required column — exit 1
 - CSV with no `status == "ok"` rows — workload skipped with warning
-- TPOT with some rows where `output_tokens <= 1` — those rows excluded from TPOT aggregation
+- TPOT with some rows where `output_tokens <= 1` — those rows excluded, valid rows aggregated correctly
 - TPOT where all rows have `output_tokens <= 1` — TPOT rows skipped with warning
+- Single-row workload (only 1 `status == "ok"` row) — percentile falls back to the single value
 - `--run` argument overrides `current_run` in setup_config.json
 - Existing `deploy_comparison_table.txt` is overwritten
 
