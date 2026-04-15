@@ -18,8 +18,7 @@ version: "2"
 seed: 42
 category: language
 aggregate_rate: 210.0
-num_requests: 0
-horizon: 60000000  # 60 seconds
+num_requests: 25200
 
 clients:
   - id: "critical"

@@ -1,6 +1,6 @@
 common:
   observe:
-    request_multiplier: 10
+    request_multiplier: 1
   build:
     commands:
     - - go
@@ -65,25 +65,28 @@ common:
               requests:
                 nvidia.com/gpu: 1
             args:
+            - --max-model-len=40960
             - --block-size=64
             - --max-num-seqs=256
             - --max-num-batched-tokens=2048
-            # - --max-model-len=36000
             - --gpu-memory-utilization=0.95
-            # - --kv-events-config={"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://$(GAIE_RELEASE_NAME_POSTFIX)-gaie-epp.$(NAMESPACE).svc.cluster.local:5557","topic":"kv@$(POD_IP):8000@Qwen/Qwen3-32B"}
-            # env:
-            # - name: GAIE_RELEASE_NAME_POSTFIX
-            # - name: NAMESPACE
-            #   valueFrom:
-            #     fieldRef:
-            #       fieldPath: metadata.namespace
-            # - name: POD_IP
-            #   valueFrom:
-            #     fieldRef:
-            #       apiVersion: v1
-            #       fieldPath: status.podIP
-            # - name: TRITON_CACHE_DIR
-            #   value: /tmp/.triton-cache
+            - --no-enable-prefix-caching
+            - --enable-chunked-prefill
+            env:
+            - name: GAIE_RELEASE_NAME_POSTFIX
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: status.podIP
+            - name: PYTHONHASHSEED
+              value: '42'
+            - name: TRITON_CACHE_DIR
+              value: /tmp/.triton-cache
             extraConfig:
               startupProbe:
                 httpGet:
@@ -108,7 +111,7 @@ common:
         build:
           hub: ghcr.io/kalantar
           name: llm-d-inference-scheduler
-          tag: adminctrl1
+          tag: ac2
           platform: linux/amd64
           pullPolicy: Always
 scenarios:
@@ -125,7 +128,7 @@ scenarios:
             inferenceExtension:
               pluginsConfigFile: custom-plugins.yaml
               flags:
-                v: 5
+                v: 3
               monitoring:
                 interval: 5s
             provider:
@@ -168,8 +171,32 @@ scenarios:
         shared:
           helmValues:
             inferenceExtension:
+              image:
+                hub: ghcr.io/llm-d
+                name: llm-d-inference-scheduler
+                tag: v0.7.1
+                pullPolicy: Always
+              pluginsConfigFile: custom-plugins.yaml
               flags:
-                v: 5
+                v: 3
+              monitoring:
+                interval: 5s
+              extProcPort: 9002
+              extraContainerPorts:
+              - name: zmq
+                containerPort: 5557
+                protocol: TCP
+              extraServicePorts:
+              - name: zmq
+                port: 5557
+                targetPort: 5557
+                protocol: TCP
+              env:
+              - name: HF_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: hf-secret
+                    key: HF_TOKEN
             provider:
               name: istio
             istio:
@@ -185,18 +212,14 @@ scenarios:
                       maxConnections: 256000
                       maxConnectionDuration: 1800s
                       connectTimeout: 900s
-        treatment:
-          helmValues:
-            inferenceExtension:
-              pluginsConfigFile: custom-plugins.yaml
         inferenceObjectives:
         - name: critical
           priority: 100
         - name: standard
           priority: 0
-        - name: sheddable
-          priority: -10
         - name: batch
+          priority: -10
+        - name: sheddable
           priority: -50
   adaptive-routing:
     target:
@@ -216,7 +239,7 @@ scenarios:
                 pullPolicy: Always
               pluginsConfigFile: custom-plugins.yaml
               flags:
-                v: 5
+                v: 3
               monitoring:
                 interval: 5s
               extProcPort: 9002

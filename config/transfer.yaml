@@ -7,11 +7,9 @@ algorithm:
   source: sim2real_bundle_14b/algorithm/admission.go
 
 baseline:
-  # sim:
-  #   config: sim2real_golden_correct/routers/policy_baseline_322.yaml
   real:
     notes: |
-      use the default llm-d-inference-scheduler / GAIE plugin. Use the same EPP config for both baseline and treatment, but just include the configuration for adding admission control if it needs to be activated. The inference objective configuration will look like the following:
+      Note that inference objective is configured like the following
 
       ```yaml
       inferenceObjectives:
@@ -25,39 +23,32 @@ baseline:
           priority: -50
       ````
 
-      The default plugin for baseline is
+      Use the random picker plugin for the real baseline generation:
 
       ```yaml
       apiVersion: inference.networking.x-k8s.io/v1alpha1
       kind: EndpointPickerConfig
       plugins:
-      - type: queue-scorer
-      - type: kv-cache-utilization-scorer
-      - type: prefix-cache-scorer
+      - type: random-picker
       schedulingProfiles:
       - name: default
         plugins:
-        - pluginRef: queue-scorer
-        - pluginRef: kv-cache-utilization-scorer
-        - pluginRef: prefix-cache-scorer
-      ```
-
-      So use the same plugin configuration with adaptive admission control for the treatment.
+        - pluginRef: random-picker
+          weight: 1
+      ````
 
 workloads:
-# - sim2real_bundle_14b/workloads/w1_14b.yaml
-- sim2real_bundle_14b/workloads/w2_14b_burst.yaml
-# - sim2real_bundle_14b/workloads/w2_14b_burst.yaml
-# - sim2real_bundle_14b/workloads/w3_14b_high_sheddable.yaml
+- sim2real_bundle_14b/workloads/w3_14b_high_sheddable.yaml
+- sim2real_bundle_14b/workloads/w1_14b.yaml
 
 hints:
   files:
   - sim2real_bundle_14b/README.md
-  # files:
-  # - sim2real_golden_correct/README.md
-  # - sim2real_golden_correct/transfer_hint.md
-  # - sim2real_golden_correct/feedback.md
-  # notes: Please check upstream GAIE for scorers that already exist and reuse instead of implementing new ones.
+  text: |
+    You need to override the saturation detection scheme in the legacy admission control in 
+    the treatment config generation by disabling it by making it ineffective using 
+    utilization-detector and setting the values basically ineffective so the system is never 
+    considered saturation, resulting in an always admit policy when it reaches our controller.
 
 context:
   files:

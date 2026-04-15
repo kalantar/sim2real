@@ -74,7 +74,7 @@ def compile_pipeline(
     values["gaie_config"] = json.dumps(
         values.get("stack", {}).get("gaie", {}).get(gaie_key, {}).get("helmValues", {})
     )
-    values["inference_objectives"] = (
+    values["inference_objectives"] = json.dumps(
         values.get("stack", {}).get("gaie", {}).get("inferenceObjectives", [])
     )
 
