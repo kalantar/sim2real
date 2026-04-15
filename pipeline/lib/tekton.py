@@ -18,7 +18,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _WORKLOAD_TASK_NAMES = frozenset({"run-workload", "collect-results", "stream-epp-logs"})
 _WORKLOAD_PARAM_NAMES = frozenset({"workloadName", "workloadSpec"})
 # Duration passed to the "sleep" task in standby pipelines.  The pipeline never
-# completes naturally; spec.finally (teardown) only runs on cancel/stop.
+# completes naturally; spec.finally (teardown) runs on cancel, failure, and success.
 _STANDBY_SLEEP_DURATION = "infinity"
 
 
@@ -315,8 +315,9 @@ def make_experiment_pipeline(
             )
 
         # Finally tasks → regular tasks, running after the leaf tasks of this group.
-        # Also added to all_finally_tasks (no runAfter) so the combined pipeline's
-        # spec.finally runs them on cancel or failure.
+        # Also copied to all_finally_tasks (no runAfter) so spec.finally runs them
+        # on cancel or failure, cleaning up whichever stack was active at the time.
+        # On success these are redundant no-ops; on cancel they are the only cleanup.
         finally_prefixed = []
         for task in phase_finally:
             all_tasks.append(

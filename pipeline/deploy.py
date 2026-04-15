@@ -310,18 +310,46 @@ def _get_phase_status(phase: str, cluster_dir: Path, namespace: str,
     return "Unknown"
 
 
-def _extract_phase_from_pvc(phase: str, run_name: str, namespace: str,
-                             run_dir: Path) -> None:
-    """Extract phase results from data-pvc using a temporary extractor pod.
+def _probe_phase_sizes(pod_name: str, run_name: str, phases: list[str],
+                       namespace: str) -> dict[str, int]:
+    """Return byte sizes for each phase directory on the PVC."""
+    sizes: dict[str, int] = {}
+    for phase in phases:
+        result = run(
+            ["kubectl", "exec", pod_name, f"-n={namespace}", "--",
+             "du", "-sb", f"/data/{run_name}/{phase}"],
+            check=False, capture=True,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            sizes[phase] = int(result.stdout.strip().split()[0])
+        else:
+            sizes[phase] = 0
+    return sizes
+
+
+def _fmt_size(b: int) -> str:
+    if b >= 1 << 30:
+        return f"{b / (1 << 30):.1f} GB"
+    if b >= 1 << 20:
+        return f"{b / (1 << 20):.0f} MB"
+    return f"{b / (1 << 10):.0f} KB"
+
+
+def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
+                              run_dir: Path,
+                              skip_logs: bool = False) -> dict[str, "Exception | None"]:
+    """Extract results for one or more phases from data-pvc using a single pod.
 
     Data layout on PVC (written by run-workload-blis-observe):
       /data/{runName}/{phase}/{workloadName}/trace_header.yaml
       /data/{runName}/{phase}/{workloadName}/trace_data.csv
 
-    Extracted to:
-      run_dir/deploy_{phase}_log/{workloadName}/...
+    When *skip_logs* is True, only trace files are copied (skipping vLLM and
+    EPP log files which typically account for the bulk of the data).
+
+    Returns a dict mapping phase -> None (success) or Exception (failure).
     """
-    pod_name = f"sim2real-extract-{phase}"
+    pod_name = "sim2real-extract"
 
     # Clean up any leftover pod from a prior failed attempt
     run(["kubectl", "delete", "pod", pod_name, "-n", namespace,
@@ -333,7 +361,7 @@ def _extract_phase_from_pvc(phase: str, run_name: str, namespace: str,
             "volumes": [{"name": "data", "persistentVolumeClaim": {"claimName": "data-pvc"}}],
             "containers": [{
                 "name": "e", "image": "alpine:3.19",
-                "command": ["sleep", "120"],
+                "command": ["sleep", "600"],
                 "volumeMounts": [{"name": "data", "mountPath": "/data"}],
             }],
             "restartPolicy": "Never",
@@ -353,21 +381,77 @@ def _extract_phase_from_pvc(phase: str, run_name: str, namespace: str,
             check=False, capture=True)
         raise RuntimeError(f"Extractor pod {pod_name} not ready: {result.stderr.strip()}")
 
-    dest_dir = run_dir / f"deploy_{phase}_log"
-    dest_dir.mkdir(parents=True, exist_ok=True)
+    errors: dict[str, "Exception | None"] = {}
     try:
-        result = run(
-            ["kubectl", "cp",
-             f"{namespace}/{pod_name}:/data/{run_name}/{phase}/",
-             str(dest_dir), "--retries=3"],
-            check=False, capture=True,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"kubectl cp failed: {result.stderr.strip()}")
+        # ── Size probe ──────────────────────────────────────────────────
+        sizes = _probe_phase_sizes(pod_name, run_name, phases, namespace)
+        total = sum(sizes.values())
+
+        if total > 1 << 30:  # > 1 GB
+            breakdown = ", ".join(f"{p}: {_fmt_size(s)}" for p, s in sizes.items())
+            warn(f"Total data size: {_fmt_size(total)} ({breakdown})")
+            if not skip_logs:
+                print("        Logs make up most of the size. "
+                      "Re-run with --skip-logs to collect traces only.")
+                answer = input("        Continue with full download? [y/N] ").strip().lower()
+                if answer != "y":
+                    info("Aborted. Re-run with --skip-logs to collect traces only.")
+                    return errors
+            else:
+                info("--skip-logs: collecting traces only")
+
+        # ── Copy ────────────────────────────────────────────────────────
+        for phase in phases:
+            dest_dir = run_dir / "results" / phase
+            dest_dir.mkdir(parents=True, exist_ok=True)
+
+            if skip_logs:
+                # Selective copy: tar only trace files on the pod, extract locally
+                tar_cmd = (
+                    f"cd /data/{run_name}/{phase} && "
+                    f"find . \\( -name trace_data.csv -o -name trace_header.yaml "
+                    f"-o -name epp_stream_done \\) -print0 | "
+                    f"tar cf - --null -T -"
+                )
+                remote = subprocess.run(
+                    ["kubectl", "exec", pod_name, f"-n={namespace}", "--",
+                     "sh", "-c", tar_cmd],
+                    capture_output=True,
+                )
+                if remote.returncode != 0:
+                    errors[phase] = RuntimeError(
+                        f"selective tar failed: {remote.stderr.decode().strip()}")
+                elif not remote.stdout:
+                    errors[phase] = RuntimeError("no trace files found on PVC")
+                else:
+                    extract = subprocess.run(
+                        ["tar", "xf", "-", "-C", str(dest_dir)],
+                        input=remote.stdout, capture_output=True,
+                    )
+                    if extract.returncode != 0:
+                        errors[phase] = RuntimeError(
+                            f"local tar extract failed: "
+                            f"{extract.stderr.decode().strip()}")
+                    else:
+                        errors[phase] = None
+            else:
+                result = run(
+                    ["kubectl", "cp",
+                     f"{namespace}/{pod_name}:/data/{run_name}/{phase}/",
+                     str(dest_dir), "--retries=3"],
+                    check=False, capture=True,
+                )
+                if result.returncode != 0:
+                    errors[phase] = RuntimeError(
+                        f"kubectl cp failed: {result.stderr.strip()}")
+                else:
+                    errors[phase] = None
     finally:
         run(["kubectl", "delete", "pod", pod_name, "-n", namespace,
              "--ignore-not-found", "--force", "--grace-period=0"],
             check=False, capture=True)
+
+    return errors
 
 
 def _cmd_collect(args, manifest: dict, run_dir: Path, setup_config: dict):
@@ -424,23 +508,35 @@ def _cmd_collect(args, manifest: dict, run_dir: Path, setup_config: dict):
     pending: list[str] = []
     failed: list[str] = []
 
+    ready_to_extract: list[str] = []
     for phase in phases_to_collect:
         status = _get_phase_status(phase, cluster_dir, namespace, experiment_pr_name)
-
         if status == "Succeeded":
-            try:
-                _extract_phase_from_pvc(phase, run_name, namespace, run_dir)
-                ok(f"Collected: {phase}")
-                collected.append(phase)
-            except RuntimeError as e:
-                warn(f"Extraction failed for {phase}: {e}")
-                failed.append(phase)
+            ready_to_extract.append(phase)
         elif status in ("Running", "Started"):
             info(f"Pending: {phase} (status: {status})")
             pending.append(phase)
         else:
             warn(f"Check: {phase} (status: {status})")
             failed.append(phase)
+
+    if ready_to_extract:
+        try:
+            skip_logs = getattr(args, "skip_logs", False)
+            errors = _extract_phases_from_pvc(
+                ready_to_extract, run_name, namespace, run_dir,
+                skip_logs=skip_logs)
+        except RuntimeError as e:
+            warn(f"Extractor pod failed: {e}")
+            failed.extend(ready_to_extract)
+        else:
+            for phase, exc in errors.items():
+                if exc is None:
+                    ok(f"Collected: {phase}")
+                    collected.append(phase)
+                else:
+                    warn(f"Extraction failed for {phase}: {exc}")
+                    failed.append(phase)
 
     # Print summary
     print(f"\n  Collected: {len(collected)}/{len(phases_to_collect)} phases")
@@ -449,7 +545,7 @@ def _cmd_collect(args, manifest: dict, run_dir: Path, setup_config: dict):
     if failed:
         print(f"  Failed:    {', '.join(failed)}")
     if collected:
-        dirs = "  ".join(f"deploy_{p}_log/" for p in collected)
+        dirs = "  ".join(f"results/{p}/" for p in collected)
         print(f"  Results:   {run_dir.relative_to(REPO_ROOT)}/{dirs}")
         print("\n  Next:      /sim2real-analyze")
     print()
@@ -486,6 +582,8 @@ Examples:
     collect_p = sub.add_parser("collect", help="Pull results for completed packages")
     collect_p.add_argument("--package", nargs="+", metavar="NAME",
                            help="Collect only these packages")
+    collect_p.add_argument("--skip-logs", action="store_true", dest="skip_logs",
+                           help="Skip vLLM and EPP log files, collect only traces")
 
     return p
 

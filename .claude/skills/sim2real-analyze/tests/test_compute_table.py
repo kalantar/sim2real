@@ -40,8 +40,8 @@ def make_row(
 def setup_run(tmp_path: Path, run_name: str = "testrun") -> tuple[Path, Path, Path]:
     """Create workspace structure, return (workspace_dir, baseline_log, treatment_log)."""
     run_dir = tmp_path / "workspace" / "runs" / run_name
-    baseline_log = run_dir / "deploy_baseline_log"
-    treatment_log = run_dir / "deploy_treatment_log"
+    baseline_log = run_dir / "results" / "baseline"
+    treatment_log = run_dir / "results" / "treatment"
     baseline_log.mkdir(parents=True)
     treatment_log.mkdir(parents=True)
     return tmp_path / "workspace", baseline_log, treatment_log
@@ -190,14 +190,14 @@ def test_load_csv_empty_exits(tmp_path, capsys):
 def test_main_missing_both_log_dirs(tmp_path, capsys, monkeypatch):
     ws, _, _ = setup_run(tmp_path)
     import shutil
-    shutil.rmtree(tmp_path / "workspace" / "runs" / "testrun" / "deploy_baseline_log")
-    shutil.rmtree(tmp_path / "workspace" / "runs" / "testrun" / "deploy_treatment_log")
+    shutil.rmtree(tmp_path / "workspace" / "runs" / "testrun" / "results" / "baseline")
+    shutil.rmtree(tmp_path / "workspace" / "runs" / "testrun" / "results" / "treatment")
     monkeypatch_workspace(compute_table, ws)
     monkeypatch.setattr(sys, "argv", ["compute_table.py", "--run", "testrun"])
     with pytest.raises(SystemExit) as exc:
         compute_table.main()
     assert exc.value.code == 1
-    assert "deploy_baseline_log" in capsys.readouterr().err
+    assert "results/baseline" in capsys.readouterr().err
 
 
 def test_main_missing_one_log_dir(tmp_path, capsys, monkeypatch):
@@ -209,7 +209,7 @@ def test_main_missing_one_log_dir(tmp_path, capsys, monkeypatch):
     with pytest.raises(SystemExit) as exc:
         compute_table.main()
     assert exc.value.code == 1
-    assert "deploy_baseline_log" in capsys.readouterr().err
+    assert "results/baseline" in capsys.readouterr().err
 
 
 def test_main_no_common_workloads(tmp_path, capsys, monkeypatch):

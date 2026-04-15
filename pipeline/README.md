@@ -100,7 +100,7 @@ python pipeline/deploy.py [flags]
 python pipeline/deploy.py collect [--package NAME…]
 ```
 
-Polls PipelineRun status, extracts results from the cluster PVC, and writes to `workspace/runs/<run>/deploy_{baseline,treatment}_log/<workload>/`.
+Polls PipelineRun status, extracts results from the cluster PVC, and writes to `workspace/runs/<run>/results/{baseline,treatment}/<workload>/`.
 
 ---
 

@@ -196,11 +196,11 @@ def main() -> None:
 
     run_name = _resolve_run(args.run)
     run_dir = WORKSPACE_DIR / "runs" / run_name
-    baseline_log = run_dir / "deploy_baseline_log"
-    treatment_log = run_dir / "deploy_treatment_log"
+    baseline_log = run_dir / "results" / "baseline"
+    treatment_log = run_dir / "results" / "treatment"
 
     if not baseline_log.exists() or not treatment_log.exists():
-        err("need both deploy_baseline_log/ and deploy_treatment_log/ — run 'pipeline/deploy.py collect' first")
+        err("need both results/baseline/ and results/treatment/ — run 'pipeline/deploy.py collect' first")
         sys.exit(1)
 
     baseline_wl = {

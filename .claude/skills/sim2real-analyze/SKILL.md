@@ -103,7 +103,7 @@ For each user request:
    ```
    The script must:
    - Import pandas, matplotlib, seaborn as needed
-   - Load CSVs from `workspace/runs/<name>/deploy_baseline_log/{workload}/trace_data.csv` and `deploy_treatment_log/`
+   - Load CSVs from `workspace/runs/<name>/results/baseline/{workload}/trace_data.csv` and `results/treatment/`
    - All timestamps are in **microseconds** — divide by 1000 for milliseconds
    - Filter to `status == "ok"` rows before computing any metrics
    - Save charts to `workspace/runs/<name>/results_charts/<descriptive-name>.png` or `.html`
@@ -139,15 +139,16 @@ Loop until the user says "done", "exit", "quit", "that's all", or similar.
 
 ```
 workspace/runs/<name>/
-  deploy_baseline_log/
-    workload_<name>/
-      trace_data.csv    # columns: send_time_us, first_chunk_time_us, last_chunk_time_us,
-                        #          output_tokens, arrival_time_us, input_tokens, status, ...
-      trace_header.yaml # model, time_unit (microseconds), workload_spec, server config
-  deploy_treatment_log/
-    workload_<name>/
-      trace_data.csv
-      trace_header.yaml
+  results/
+    baseline/
+      workload_<name>/
+        trace_data.csv    # columns: send_time_us, first_chunk_time_us, last_chunk_time_us,
+                          #          output_tokens, arrival_time_us, input_tokens, status, ...
+        trace_header.yaml # model, time_unit (microseconds), workload_spec, server config
+    treatment/
+      workload_<name>/
+        trace_data.csv
+        trace_header.yaml
   deploy_comparison_table.txt  # written by compute_table.py
   results_charts/              # your analysis outputs go here
 ```
@@ -174,7 +175,7 @@ if len(workloads) == 1:
 
 for ax, wl in zip(axes, workloads):
     for phase in ["baseline", "treatment"]:
-        df = pd.read_csv(f"workspace/runs/{run}/deploy_{phase}_log/{wl}/trace_data.csv")
+        df = pd.read_csv(f"workspace/runs/{run}/results/{phase}/{wl}/trace_data.csv")
         df = df[df["status"] == "ok"]  # only compute metrics for successful requests
         ttft = (df["first_chunk_time_us"] - df["send_time_us"]) / 1000
         ax.hist(ttft, bins=50, alpha=0.6, label=phase)
@@ -200,7 +201,7 @@ wl = "workload_fm8_short_output_highrate"
 
 fig, ax = plt.subplots(figsize=(12, 4))
 for phase in ["baseline", "treatment"]:
-    df = pd.read_csv(f"workspace/runs/{run}/deploy_{phase}_log/{wl}/trace_data.csv")
+    df = pd.read_csv(f"workspace/runs/{run}/results/{phase}/{wl}/trace_data.csv")
     df = df[df["status"] == "ok"]  # only compute metrics for successful requests
     t0 = df["arrival_time_us"].min()
     df["t_sec"] = (df["arrival_time_us"] - t0) / 1e6
