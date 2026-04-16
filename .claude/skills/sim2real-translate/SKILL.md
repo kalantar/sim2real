@@ -348,7 +348,7 @@ Wait for the Writer to send a message to the main session. Handle each case:
 
 **On "baseline-ready: ...":**
 
-Read `$RUN_DIR/baseline_config.yaml` and print to user:
+Read `$RUN_DIR/generated/baseline_config.yaml` and print to user:
 ```
 ━━━ Baseline Config (derived from sim → real EPP) ━━━
 <file contents>
@@ -376,7 +376,7 @@ SendMessage("writer", "continue")
 
 **On "treatment-ready: ...":**
 
-Read `$RUN_DIR/treatment_config.yaml` and print to user:
+Read `$RUN_DIR/generated/treatment_config.yaml` and print to user:
 ```
 ━━━ Treatment Config (derived from baseline + algorithm) ━━━
 <file contents>
@@ -406,7 +406,7 @@ import json
 o = json.load(open('$RUN_DIR/translation_output.json'))
 print('Plugin files:', o.get('files_created', []))
 "
-python3 -c "print(open('$RUN_DIR/treatment_config.yaml').read())"
+python3 -c "print(open('$RUN_DIR/generated/treatment_config.yaml').read())"
 ```
 
 Print to user:
@@ -522,11 +522,6 @@ for f in o['files_created'] + o.get('files_modified', []):
     dst = gen / Path(f).name
     shutil.copy2(src, dst)
     print(f'  {Path(f).name} → generated/')
-shutil.copy2('$RUN_DIR/treatment_config.yaml', gen / 'treatment_config.yaml')
-baseline_cfg = Path('$RUN_DIR') / 'baseline_config.yaml'
-if baseline_cfg.exists():
-    shutil.copy2(baseline_cfg, gen / 'baseline_config.yaml')
-    print('  baseline_config.yaml → generated/')
 print('Generated artifacts ready.')
 "
 ```
@@ -592,7 +587,6 @@ Snapshots: <N> versions in $RUN_DIR/snapshots/
 
 Output artifacts:
   $RUN_DIR/translation_output.json
-  $RUN_DIR/treatment_config.yaml
   $RUN_DIR/generated/
   $RUN_DIR/snapshots/
   $RUN_DIR/review/

@@ -111,7 +111,7 @@ common:
         build:
           hub: ghcr.io/kalantar
           name: llm-d-inference-scheduler
-          tag: ac2
+          tag: ac
           platform: linux/amd64
           pullPolicy: Always
 scenarios:

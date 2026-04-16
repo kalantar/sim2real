@@ -1,0 +1,43 @@
+kind: sim2real-transfer
+version: 3
+
+scenario: admission_control
+
+algorithm:
+  source: sim2real_bundle_14b/algorithm/admission.go
+
+baseline:
+  sim:
+    config: sim2real_bundle_14b_new/algorithm/config.yaml
+  real:
+    notes: |
+      Use the default llm-d-inference-scheduler / GAIE plugin. Use the same EPP config for both baseline and treatment, but just include the configuration for adding admission control if it needs to be activated. The inference objective configuration will look like the following:
+
+      ```yaml
+      inferenceObjectives:
+        - name: critical
+          priority: 100
+        - name: standard
+          priority: 0
+        - name: sheddable
+          priority: -10
+        - name: batch
+          priority: -50
+      ````
+
+      So use the same plugin configuration with adaptive admission control for the treatment.
+
+workloads:
+- sim2real_bundle_14b_new/workloads/w3_14b_high_sheddable.yaml
+- sim2real_bundle_14b_new/workloads/w1_14b.yaml
+
+hints:
+  files:
+  - sim2real_bundle_14b_new/README.md
+  # notes: Please check upstream GAIE for scorers that already exist and reuse instead of implementing new ones.
+
+context:
+  files:
+  - blis-context.md
+  - gaie_context.md
+  - llm-d-inference-scheduler-context.md

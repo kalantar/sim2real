@@ -8,8 +8,10 @@ Use `deploy.py collect` to pull results for completed packages.
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
+import time
 import yaml
 
 from pathlib import Path
@@ -150,6 +152,44 @@ def _inject_image_into_values(run_dir: Path, full_image: str, scenario: str):
     ok("values.yaml re-merged with EPP image")
 
 
+# ── PipelineRun helpers ──────────────────────────────────────────────────────
+
+def _cancel_and_delete_pipelinerun(pr_name: str, namespace: str) -> None:
+    """If a PipelineRun with the given name exists, cancel it, wait for it to
+    finish cancelling, then delete it so a fresh one can be submitted."""
+    exists = run(
+        ["kubectl", "get", "pipelinerun", pr_name, "-n", namespace],
+        check=False, capture=True,
+    )
+    if exists.returncode != 0:
+        return  # doesn't exist, nothing to cancel
+
+    status = _check_pipelinerun_status(pr_name, namespace)
+    info(f"Existing PipelineRun {pr_name!r} found (status: {status}); cancelling …")
+
+    if status in ("Running", "Started"):
+        run(
+            ["kubectl", "patch", "pipelinerun", pr_name,
+             "--type=merge", "-p", '{"spec":{"status":"CancelledRunFinally"}}',
+             "-n", namespace],
+            check=False, capture=True,
+        )
+        for _ in range(40):  # wait up to 120 s
+            time.sleep(3)
+            current = _check_pipelinerun_status(pr_name, namespace)
+            if current not in ("Running", "Started"):
+                info(f"PipelineRun {pr_name!r} cancelled (now: {current})")
+                break
+        else:
+            warn(f"PipelineRun {pr_name!r} did not cancel within 120 s; deleting anyway")
+
+    run(
+        ["kubectl", "delete", "pipelinerun", pr_name, "-n", namespace,
+         "--ignore-not-found"],
+        check=False, capture=True,
+    )
+
+
 # ── Deploy command ───────────────────────────────────────────────────────────
 
 def _print_dry_run(packages: list[str], cluster_dir: Path):
@@ -260,15 +300,16 @@ def _cmd_deploy(args, manifest: dict, run_dir: Path, setup_config: dict):
     submitted = {}
     for pkg in sorted(packages):
         for pr_path in sorted((cluster_dir / pkg).glob("pipelinerun-*.yaml")):
+            pr_data = yaml.safe_load(pr_path.read_text())
+            pr_name = pr_data.get("metadata", {}).get("name", pr_path.stem)
+
+            _cancel_and_delete_pipelinerun(pr_name, namespace)
+
             result = run(["kubectl", "apply", "-f", str(pr_path), "-n", namespace],
                          check=False, capture=True)
             if result.returncode != 0:
                 err(f"kubectl apply failed for {pr_path.name}: {result.stderr}")
                 continue
-
-            # Extract PipelineRun name from YAML
-            pr_data = yaml.safe_load(pr_path.read_text())
-            pr_name = pr_data.get("metadata", {}).get("name", pr_path.stem)
             key = f"{pkg}/{pr_path.stem}"
             submitted[key] = pr_name
             ok(f"Submitted: {key} → {pr_name}")
@@ -289,25 +330,6 @@ def _check_pipelinerun_status(pr_name: str, namespace: str) -> str:
         return "Unknown"
     return result.stdout.strip() or "Unknown"
 
-
-def _get_phase_status(phase: str, cluster_dir: Path, namespace: str,
-                      experiment_pr_name: "str | None") -> str:
-    """Status for a phase: check its own PR first, fall back to experiment PR.
-
-    baseline/treatment PRs are only submitted when deployed individually (--package).
-    When the experiment package was deployed instead, fall back to experiment status.
-    """
-    pr_yamls = sorted((cluster_dir / phase).glob("pipelinerun-*.yaml"))
-    if pr_yamls:
-        pr_data = yaml.safe_load(pr_yamls[0].read_text())
-        pr_name = pr_data.get("metadata", {}).get("name", "")
-        if pr_name:
-            status = _check_pipelinerun_status(pr_name, namespace)
-            if status != "Unknown":
-                return status
-    if experiment_pr_name:
-        return _check_pipelinerun_status(experiment_pr_name, namespace)
-    return "Unknown"
 
 
 def _probe_phase_sizes(pod_name: str, run_name: str, phases: list[str],
@@ -361,7 +383,7 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
             "volumes": [{"name": "data", "persistentVolumeClaim": {"claimName": "data-pvc"}}],
             "containers": [{
                 "name": "e", "image": "alpine:3.19",
-                "command": ["sleep", "600"],
+                "command": ["sleep", "3600"],
                 "volumeMounts": [{"name": "data", "mountPath": "/data"}],
             }],
             "restartPolicy": "Never",
@@ -403,37 +425,48 @@ def _extract_phases_from_pvc(phases: list[str], run_name: str, namespace: str,
         # ── Copy ────────────────────────────────────────────────────────
         for phase in phases:
             dest_dir = run_dir / "results" / phase
-            dest_dir.mkdir(parents=True, exist_ok=True)
+            if dest_dir.exists():
+                shutil.rmtree(dest_dir)
+            dest_dir.mkdir(parents=True)
 
             if skip_logs:
-                # Selective copy: tar only trace files on the pod, extract locally
-                tar_cmd = (
-                    f"cd /data/{run_name}/{phase} && "
-                    f"find . \\( -name trace_data.csv -o -name trace_header.yaml "
-                    f"-o -name epp_stream_done \\) -print0 | "
-                    f"tar cf - --null -T -"
-                )
-                remote = subprocess.run(
+                # Selective copy: trace files + epp_logs via kubectl cp per
+                # workload; skips vLLM server_logs which dominate data volume.
+                # BusyBox tar doesn't handle large streaming well, so use cp.
+                list_result = run(
                     ["kubectl", "exec", pod_name, f"-n={namespace}", "--",
-                     "sh", "-c", tar_cmd],
-                    capture_output=True,
+                     "sh", "-c",
+                     f"ls /data/{run_name}/{phase}/"],
+                    check=False, capture=True,
                 )
-                if remote.returncode != 0:
+                if list_result.returncode != 0:
                     errors[phase] = RuntimeError(
-                        f"selective tar failed: {remote.stderr.decode().strip()}")
-                elif not remote.stdout:
-                    errors[phase] = RuntimeError("no trace files found on PVC")
+                        f"failed to list workloads: {list_result.stderr.strip()}")
+                    continue
+                workloads = list_result.stdout.strip().split() if list_result.stdout.strip() else []
+                phase_errors = []
+                for workload in workloads:
+                    wl_dest = dest_dir / workload
+                    wl_dest.mkdir(parents=True, exist_ok=True)
+                    # Copy trace files
+                    for fname in ("trace_data.csv", "trace_header.yaml", "epp_stream_done"):
+                        src = f"{namespace}/{pod_name}:/data/{run_name}/{phase}/{workload}/{fname}"
+                        r = run(["kubectl", "cp", src, str(wl_dest / fname), "--retries=3"],
+                                check=False, capture=True)
+                        if r.returncode != 0 and "no such file" not in r.stderr.lower():
+                            phase_errors.append(f"{workload}/{fname}: {r.stderr.strip()}")
+                    # Copy epp_logs directory
+                    epp_src = f"{namespace}/{pod_name}:/data/{run_name}/{phase}/{workload}/epp_logs/"
+                    epp_dest = wl_dest / "epp_logs"
+                    epp_dest.mkdir(exist_ok=True)
+                    r = run(["kubectl", "cp", epp_src, str(epp_dest), "--retries=3"],
+                            check=False, capture=True)
+                    if r.returncode != 0 and "no such file" not in r.stderr.lower():
+                        phase_errors.append(f"{workload}/epp_logs: {r.stderr.strip()}")
+                if phase_errors:
+                    errors[phase] = RuntimeError("; ".join(phase_errors))
                 else:
-                    extract = subprocess.run(
-                        ["tar", "xf", "-", "-C", str(dest_dir)],
-                        input=remote.stdout, capture_output=True,
-                    )
-                    if extract.returncode != 0:
-                        errors[phase] = RuntimeError(
-                            f"local tar extract failed: "
-                            f"{extract.stderr.decode().strip()}")
-                    else:
-                        errors[phase] = None
+                    errors[phase] = None
             else:
                 result = run(
                     ["kubectl", "cp",
@@ -494,41 +527,20 @@ def _cmd_collect(args, manifest: dict, run_dir: Path, setup_config: dict):
         err("No data phases to collect (expected baseline and/or treatment packages).")
         sys.exit(1)
 
-    # Resolve experiment PipelineRun name for status fallback
-    experiment_pr_name: "str | None" = None
-    if "experiment" in all_packages:
-        exp_prs = sorted((cluster_dir / "experiment").glob("pipelinerun-*.yaml"))
-        if exp_prs:
-            exp_data = yaml.safe_load(exp_prs[0].read_text())
-            experiment_pr_name = exp_data.get("metadata", {}).get("name", "")
-
     step(1, "Collecting Results")
 
     collected: list[str] = []
-    pending: list[str] = []
     failed: list[str] = []
 
-    ready_to_extract: list[str] = []
-    for phase in phases_to_collect:
-        status = _get_phase_status(phase, cluster_dir, namespace, experiment_pr_name)
-        if status == "Succeeded":
-            ready_to_extract.append(phase)
-        elif status in ("Running", "Started"):
-            info(f"Pending: {phase} (status: {status})")
-            pending.append(phase)
-        else:
-            warn(f"Check: {phase} (status: {status})")
-            failed.append(phase)
-
-    if ready_to_extract:
+    if phases_to_collect:
         try:
             skip_logs = getattr(args, "skip_logs", False)
             errors = _extract_phases_from_pvc(
-                ready_to_extract, run_name, namespace, run_dir,
+                phases_to_collect, run_name, namespace, run_dir,
                 skip_logs=skip_logs)
         except RuntimeError as e:
             warn(f"Extractor pod failed: {e}")
-            failed.extend(ready_to_extract)
+            failed.extend(phases_to_collect)
         else:
             for phase, exc in errors.items():
                 if exc is None:
@@ -540,8 +552,6 @@ def _cmd_collect(args, manifest: dict, run_dir: Path, setup_config: dict):
 
     # Print summary
     print(f"\n  Collected: {len(collected)}/{len(phases_to_collect)} phases")
-    if pending:
-        print(f"  Pending:   {', '.join(pending)}")
     if failed:
         print(f"  Failed:    {', '.join(failed)}")
     if collected:

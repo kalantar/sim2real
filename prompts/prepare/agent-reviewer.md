@@ -69,7 +69,7 @@ Example queries:
 You stay idle after initialization. When the writer sends you a review request:
 
 1. Read ALL plugin files listed in the writer's message (paths provided in the request) — fresh, no cached content
-2. Read `{RUN_DIR}/treatment_config.yaml` fresh
+2. Read `{RUN_DIR}/generated/treatment_config.yaml` fresh
 3. Read `{RUN_DIR}/translation_output.json` for metadata cross-reference
 4. Read `{TARGET_REPO}/pkg/plugins/register.go` fresh
 5. Apply ALL five review criteria below (never skip one)
@@ -155,7 +155,7 @@ so you MUST use `env_defaults.yaml` as the reference.
 **Step B — Simulate the embed:**
 `prepare.py` will do exactly this (Python pseudocode):
 ```python
-tc_content = open("{RUN_DIR}/treatment_config.yaml").read()
+tc_content = open("{RUN_DIR}/generated/treatment_config.yaml").read()
 alg_values["stack"]["gaie"]["treatment"]["helmValues"]["inferenceExtension"]["pluginsCustomConfig"] = {
     "custom-plugins.yaml": tc_content
 }
@@ -187,7 +187,7 @@ Determine the source of truth for thresholds and weights:
 Verify mechanically:
 
 1. For every numeric threshold and weight in the reference set above, confirm a corresponding
-   field exists in `{RUN_DIR}/treatment_config.yaml`.
+   field exists in `{RUN_DIR}/generated/treatment_config.yaml`.
 2. Confirm the plugin Go file(s) contain a config struct with yaml field tags that match
    the fields in `treatment_config.yaml` (look for `yaml:"fieldname"` tags), or a call to
    a config-loading function.

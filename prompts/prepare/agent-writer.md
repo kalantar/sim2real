@@ -80,7 +80,7 @@ Read:
 2. `{BASELINE_REAL_CONFIG}` (if not null) — the real EPP YAML template
 3. `{BASELINE_REAL_NOTES}` — translation hints for baseline mapping
 
-Your goal: produce `{RUN_DIR}/baseline_config.yaml` — a real, functional EPP YAML with the
+Your goal: produce `{RUN_DIR}/generated/baseline_config.yaml` — a real, functional EPP YAML with the
 actual scorer names and weights from `{BASELINE_SIM_CONFIG}` substituted into the real template.
 
 Rules:
@@ -90,9 +90,10 @@ Rules:
 - Ask the Expert if you are unsure about any scorer type string or config field name
 - If `{BASELINE_REAL_CONFIG}` is null, derive the structure from the context document and Expert
 
-Write `{RUN_DIR}/baseline_config.yaml`. Then send to main session:
+Create the `generated/` directory if needed, then write `{RUN_DIR}/generated/baseline_config.yaml`.
+Then send to main session:
 ```
-SendMessage({MAIN_SESSION_NAME}, "baseline-ready: {RUN_DIR}/baseline_config.yaml")
+SendMessage({MAIN_SESSION_NAME}, "baseline-ready: {RUN_DIR}/generated/baseline_config.yaml")
 ```
 
 Wait for the reply. The main session will either forward user feedback ("feedback: ...") or
@@ -106,11 +107,11 @@ TaskUpdate Phase 2 → completed
 Use TaskCreate: `"Phase 3: Treatment Config Derivation"` → TaskUpdate in_progress
 
 Read:
-1. `{RUN_DIR}/baseline_config.yaml` — the approved real baseline EPP YAML
+1. `{RUN_DIR}/generated/baseline_config.yaml` — the approved real baseline EPP YAML
 2. If `{ALGO_CONFIG}` is non-empty: read it — the algorithm policy config (what changes from baseline)
 3. `{ALGO_SOURCE}` — the algorithm source (regime detection logic, thresholds)
 
-Your goal: produce `{RUN_DIR}/treatment_config.yaml` — start from `baseline_config.yaml` and
+Your goal: produce `{RUN_DIR}/generated/treatment_config.yaml` — start from `generated/baseline_config.yaml` and
 apply the algorithm's changes. The treatment config must be **functional** (the Go code you
 will write in Phase 4 must read its parameters from this YAML, not hardcode them).
 
@@ -123,9 +124,9 @@ Rules:
   directly from `{ALGO_SOURCE}` (any numeric threshold or weight visible in the source)
 - Ask the Expert about config struct field names and yaml tags if needed
 
-Write `{RUN_DIR}/treatment_config.yaml`. Then send to main session:
+Write `{RUN_DIR}/generated/treatment_config.yaml`. Then send to main session:
 ```
-SendMessage({MAIN_SESSION_NAME}, "treatment-ready: {RUN_DIR}/treatment_config.yaml")
+SendMessage({MAIN_SESSION_NAME}, "treatment-ready: {RUN_DIR}/generated/treatment_config.yaml")
 ```
 
 Wait for the reply. Handle feedback / continue as in Phase 2.
@@ -141,7 +142,7 @@ Follow `prompts/prepare/translate.md`. Specifically:
 3. Write the production plugin code into `{TARGET_REPO}` at the correct package path
 4. Define a `Type` constant (kebab-case string) and a `Factory` function in your plugin file
 5. Register the plugin in `{TARGET_REPO}/pkg/plugins/register.go` with `plugin.Register(pkg.TypeConst, pkg.FactoryFunc)`
-6. Write `{RUN_DIR}/treatment_config.yaml` with `kind: {CONFIG_KIND}`
+6. Write `{RUN_DIR}/generated/treatment_config.yaml` with `kind: {CONFIG_KIND}`
 7. **Add logging** — follow the pattern established by `preemptiveshed.go`:
    - In Factory: use `logger := log.Log.WithName(Type)` and log all config parameters at
      `logger.V(logutil.TRACE).Info("Creating <PluginName>", "name", name, "param1", val1, ...)`
@@ -207,7 +208,7 @@ mkdir -p "$SNAP_DIR"
 ```
 
 Copy all `files_created` + `files_modified` entries (relative to `{TARGET_REPO}`) plus
-`{RUN_DIR}/treatment_config.yaml` into `$SNAP_DIR`:
+`{RUN_DIR}/generated/treatment_config.yaml` into `$SNAP_DIR`:
 
 ```bash
 python3 -c "
@@ -221,7 +222,7 @@ for f in o['files_created'] + o.get('files_modified', []):
     dst = snap / Path(f).name
     shutil.copy2(src, dst)
     print(f'  {Path(f).name} -> snapshots/v$SNAP_NUM/')
-shutil.copy2('{RUN_DIR}/treatment_config.yaml', snap / 'treatment_config.yaml')
+shutil.copy2('{RUN_DIR}/generated/treatment_config.yaml', snap / 'treatment_config.yaml')
 print(f'Snapshot v$SNAP_NUM saved')
 "
 ```
@@ -246,7 +247,7 @@ After each green build, send a review request to the reviewer agent:
 REVIEW REQUEST — Round <N>
 Plugin files: <absolute paths of all files_created (excluding test files), one per line>
 Test files: <absolute paths of all _test.go files created or modified, one per line>
-Treatment config: {RUN_DIR}/treatment_config.yaml
+Treatment config: {RUN_DIR}/generated/treatment_config.yaml
 Build: PASSED
 Changed since last round: <brief description, or "initial" for round 1>
 ```

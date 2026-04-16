@@ -260,18 +260,6 @@ def make_experiment_pipeline(
     for phase, wload_name, wload_data in phase_workloads:
         safe_wl = wload_name.replace("_", "-")
 
-        # Truncate safe_wl so that pr_name + "-" + prefix + longest_task_name <= 63.
-        # Tekton derives TaskRun names as "<pipelinerun-name>-<task-name>" and hashes
-        # any result over 63 chars, making pod names unidentifiable.
-        # Compute max original task name length from the compiled phase pipeline.
-        phase_all_tasks = (compiled_pipelines[phase].get("spec", {}).get("tasks", [])
-                           + compiled_pipelines[phase].get("spec", {}).get("finally", []))
-        max_orig = max((len(t["name"]) for t in phase_all_tasks), default=0)
-        # prefix = "{phase}-{safe_wl}-"  → budget for safe_wl:
-        # 63 - len(pr_name) - 1 (separator) - len(phase) - 2 (dashes) - max_orig
-        budget = max(1, 63 - len(pr_name) - len(phase) - 3 - max_orig)
-        safe_wl = safe_wl[:budget].rstrip("-")
-
         prefix = f"{phase}-{safe_wl}-"
 
         wload_param = f"workloadName-{phase}-{safe_wl}"

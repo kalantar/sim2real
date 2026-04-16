@@ -516,7 +516,7 @@ def step_test_push(cfg: SetupConfig, container_rt: str, test_push_tag: str,
 def step_pvcs(cfg: SetupConfig) -> None:
     """Step 6: Create PVCs for model, data, and source."""
     step(6, 8, "PVCs")
-    pvcs = [("model-pvc", "300Gi"), ("data-pvc", "20Gi"), ("source-pvc", "20Gi")]
+    pvcs = [("model-pvc", "300Gi"), ("data-pvc", "50Gi"), ("source-pvc", "50Gi")]
     sc_line = f"  storageClassName: {cfg.storage_class}" if cfg.storage_class else ""
 
     for name, size in pvcs:
@@ -622,6 +622,7 @@ def step_config_output(cfg: SetupConfig, run_dir: Path, container_rt: str) -> No
         "container_runtime": container_rt,
         "created_at": now_iso,
         "pipeline_commit": commit,
+        **({"epp_image": f"{cfg.registry}/{cfg.repo_name}:{cfg.run_name}"} if cfg.registry else {}),
         "stages": {
             "setup":   {"status": "completed", "completed_at": now_iso,
                         "summary": f"Namespace {cfg.namespace} configured, "
