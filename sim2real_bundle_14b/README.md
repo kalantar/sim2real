@@ -13,6 +13,8 @@ Simulation-evolved admission control that improves SLO attainment for protected 
 
 **Key insight**: GAIE legacy waits until saturation=1.0 to shed — by then queues are deep and latency is ruined. This algorithm starts at near-zero saturation. The *timing* of shedding matters more than the total amount shed.
 
+**Nil metrics handling (startup edge case)**: When a pod first starts and hasn't reported metrics yet (~200-500ms), treat it as fully loaded — matching GAIE's conservative default. In `computeSaturation`, if metrics are nil, add `1.0` to the total instead of skipping the pod. Without this, nil-metric pods pull the saturation average down, causing under-shedding during startup.
+
 ## Algorithm: GAIE Control
 
 **Source**: [`algorithm/admission_control.go`](algorithm/admission_control.go)
@@ -71,6 +73,9 @@ function AdmitRequest(request, pods):
     saturation = 0
     for each pod in pods:
         m = pod.GetMetrics()
+        if m == nil:
+            saturation += 1.0          // no metrics yet → treat as fully loaded
+            continue
         qRatio  = m.WaitingQueueSize / 5.0
         kvRatio = m.KVCacheUsagePercent / 0.8
         saturation += max(qRatio, kvRatio)
@@ -95,11 +100,6 @@ function AdmitRequest(request, pods):
 apiVersion: inference.networking.x-k8s.io/v1alpha1
 kind: EndpointPickerConfig
 plugins:
-- type: utilization-detector
-  name: noop-saturation
-  parameters:
-    queueDepthThreshold: 999999999
-    kvCacheUtilThreshold: 1.0
 - type: preemptive-shed-admitter
   name: preemptive-shed
   parameters:
@@ -111,7 +111,8 @@ plugins:
     batchShedFull: 0.10
 - type: random-picker
 saturationDetector:
-  pluginRef: noop-saturation
+  queueDepthThreshold: 999999999
+  kvCacheUtilThreshold: 0.999
 schedulingProfiles:
 - name: default
   plugins:
@@ -135,6 +136,9 @@ function AdmitRequest(request, pods):
     saturation = 0
     for each pod in pods:
         m = pod.GetMetrics()
+        if m == nil:
+            saturation += 1.0          // no metrics yet → treat as fully loaded
+            continue
         qRatio  = m.WaitingQueueSize / 5.0
         kvRatio = m.KVCacheUsagePercent / 0.8
         saturation += max(qRatio, kvRatio)
@@ -150,11 +154,6 @@ function AdmitRequest(request, pods):
 apiVersion: inference.networking.x-k8s.io/v1alpha1
 kind: EndpointPickerConfig
 plugins:
-- type: utilization-detector
-  name: noop-saturation
-  parameters:
-    queueDepthThreshold: 999999999
-    kvCacheUtilThreshold: 1.0
 - type: gaie-control-admitter
   name: gaie-control
   parameters:
@@ -162,7 +161,8 @@ plugins:
     kvCacheUtilThreshold: 0.8
 - type: random-picker
 saturationDetector:
-  pluginRef: noop-saturation
+  queueDepthThreshold: 999999999
+  kvCacheUtilThreshold: 0.999
 schedulingProfiles:
 - name: default
   plugins:
@@ -178,17 +178,12 @@ GAIE has a **two-layer admission pipeline**. Both layers run on every request:
 
 **Problem**: For variants 2 (GAIE Control) and 3 (Adaptive), we want our custom plugin to be the **sole** admission decision-maker. If Layer 1 is also active, both run — our plugin's decisions are masked by the legacy controller at saturation >= 1.0.
 
-**Solution**: Set the legacy saturation detector thresholds astronomically high so it never triggers. Add this to the YAML config for both treatment and control variants:
+**Solution**: Set the legacy saturation detector thresholds astronomically high via inline `saturationDetector` config so it never triggers. Add this to the YAML config for both treatment and control variants:
 
 ```yaml
-plugins:
-- type: utilization-detector
-  name: noop-saturation
-  parameters:
-    queueDepthThreshold: 999999999   # effectively infinite — legacy never triggers on QD
-    kvCacheUtilThreshold: 1.0        # max allowed by GAIE validation (config.go:153)
 saturationDetector:
-  pluginRef: noop-saturation
+  queueDepthThreshold: 999999999   # effectively infinite — legacy never triggers on QD
+  kvCacheUtilThreshold: 0.999      # near-max (1.0 is boundary of GAIE validation)
 ```
 
 This makes `Saturation() ≈ 0.0` always, so `LegacyAdmissionController` at `admission.go:64-84` never enters the rejection path:
@@ -206,6 +201,18 @@ func rejectIfSheddableAndSaturated(...) error {
 ```
 
 **Variant 1 (Default llm-d)** does NOT need this — it uses the built-in legacy admission as-is, which is exactly what we're comparing against.
+
+### Load Generator Concurrency (Important)
+
+BLIS simulation is true open-loop — all requests arrive at their scheduled times with no concurrency limit. To match this in real deployment, `blis observe` must use a high `--max-concurrency` so the client-side semaphore never blocks:
+
+```bash
+blis observe --max-concurrency 3000 ...
+```
+
+The default (`--max-concurrency 256`) is too low for overload experiments. At 110 QPS with ~7s average E2E, Little's law requires ~770 concurrent slots. With 256, requests queue client-side, the server only sees ~34 QPS (well within capacity), and the admission algorithm has nothing to shed. This makes baseline look artificially good and treatment look worse — the opposite of the simulation prediction.
+
+Sizing: worst-case concurrent = QPS × p99 E2E. At 140 QPS × 20s = 2,800. 3000 covers all workloads with headroom. Resource cost is negligible (goroutines + TCP sockets; pod ulimit is ~1M).
 
 ### Deployment Plan
 
