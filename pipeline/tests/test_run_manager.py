@@ -344,6 +344,10 @@ class TestInspectRun:
 
 
 class TestSwitchRun:
+    # Shared no-op injectables (submodule is a plain dir, no real git)
+    _no_dirty = staticmethod(lambda d: False)
+    _no_reset = staticmethod(lambda d: None)
+
     def _setup(self, tmp_path, run_name="adaptive6",
                files_created=None, files_modified=None,
                generated_files=None, active_run="other"):
@@ -372,7 +376,7 @@ class TestSwitchRun:
                          else [Path(p).name for p in all_targets]):
             (gen_dir / rel_path).write_text(f"// content of {rel_path}")
 
-        # Submodule dir (not a real git repo — dirty check is injected)
+        # Submodule dir (not a real git repo — dirty/reset are injected)
         sub_dir = tmp_path / "llm-d-inference-scheduler"
         sub_dir.mkdir()
         for rel_path in all_targets:
@@ -393,7 +397,7 @@ class TestSwitchRun:
 
         result = switch_run("adaptive6", ws, sub_dir, cfg,
                             confirm_fn=lambda _: True,
-                            _check_dirty=lambda d, ps: [])
+                            _is_dirty=self._no_dirty, _reset=self._no_reset)
 
         assert isinstance(result, SwitchResult)
         assert "pkg/plugins/scorer/adaptive_v2.go" in result.files_written
@@ -404,6 +408,81 @@ class TestSwitchRun:
 
         cfg_data = json.loads(cfg.read_text())
         assert cfg_data["current_run"] == "adaptive6"
+
+    def test_reset_called_before_copy(self, tmp_path):
+        """_reset must be called once, before any file copies."""
+        from pipeline.lib.run_manager import switch_run
+        ws, sub_dir, cfg, _ = self._setup(tmp_path,
+            files_modified=["pkg/plugins/scorer/adaptive_v2.go"])
+
+        call_order = []
+        import shutil as _shutil
+        real_copy2 = _shutil.copy2
+        from unittest.mock import patch
+
+        def track_reset(d):
+            call_order.append("reset")
+
+        def track_copy(src, dst):
+            call_order.append("copy")
+            return real_copy2(src, dst)
+
+        with patch("pipeline.lib.run_manager.shutil.copy2", side_effect=track_copy):
+            switch_run("adaptive6", ws, sub_dir, cfg,
+                       confirm_fn=lambda _: True,
+                       _is_dirty=self._no_dirty, _reset=track_reset)
+
+        assert call_order[0] == "reset"
+        assert "copy" in call_order
+
+    def test_stale_files_from_previous_run_deleted(self, tmp_path):
+        """Files from the previous run not present in the target run must be removed."""
+        from pipeline.lib.run_manager import switch_run
+        ws = tmp_path / "workspace"
+        ws.mkdir()
+
+        # Previous run wrote a file not present in the target run
+        prev_dir = ws / "runs" / "prev-run"
+        prev_dir.mkdir(parents=True)
+        _write_state(prev_dir, "prev-run", "routing", {})
+        _write_meta(prev_dir, {})
+        _write_translation_output(prev_dir, ["pkg/plugins/admitter/stale.go"], [])
+
+        # Target run does not include the stale file
+        target_dir = ws / "runs" / "adaptive6"
+        target_dir.mkdir(parents=True)
+        _write_state(target_dir, "adaptive6", "routing", {})
+        _write_meta(target_dir, {})
+        _write_translation_output(target_dir, [], ["pkg/plugins/scorer/adaptive_v2.go"])
+        gen_dir = target_dir / "generated"
+        gen_dir.mkdir()
+        (gen_dir / "adaptive_v2.go").write_text("// new content")
+
+        sub_dir = tmp_path / "llm-d-inference-scheduler"
+        (sub_dir / "pkg/plugins/admitter").mkdir(parents=True)
+        (sub_dir / "pkg/plugins/admitter/stale.go").write_text("// stale")
+        (sub_dir / "pkg/plugins/scorer").mkdir(parents=True)
+        (sub_dir / "pkg/plugins/scorer/adaptive_v2.go").write_text("// old")
+
+        _write_setup(ws, "prev-run")
+        cfg = ws / "setup_config.json"
+
+        switch_run("adaptive6", ws, sub_dir, cfg,
+                   confirm_fn=lambda _: True,
+                   _is_dirty=self._no_dirty, _reset=self._no_reset)
+
+        assert not (sub_dir / "pkg/plugins/admitter/stale.go").exists()
+        assert (sub_dir / "pkg/plugins/scorer/adaptive_v2.go").read_text() == "// new content"
+
+    def test_stale_cleanup_skipped_if_no_previous_run(self, tmp_path):
+        """No error when setup_config has no previous run or previous run dir is missing."""
+        from pipeline.lib.run_manager import switch_run
+        ws, sub_dir, cfg, _ = self._setup(tmp_path, active_run="")
+
+        result = switch_run("adaptive6", ws, sub_dir, cfg,
+                            confirm_fn=lambda _: True,
+                            _is_dirty=self._no_dirty, _reset=self._no_reset)
+        assert result.active_run == "adaptive6"
 
     def test_setup_config_only_updated_after_all_copies_succeed(self, tmp_path):
         """setup_config.json must NOT be updated if a copy fails."""
@@ -416,7 +495,7 @@ class TestSwitchRun:
             with pytest.raises(OSError):
                 switch_run("adaptive6", ws, sub_dir, cfg,
                            confirm_fn=lambda _: True,
-                           _check_dirty=lambda d, ps: [])
+                           _is_dirty=self._no_dirty, _reset=self._no_reset)
 
         cfg_data = json.loads(cfg.read_text())
         assert cfg_data["current_run"] == "other"
@@ -442,32 +521,11 @@ class TestSwitchRun:
             with pytest.raises(OSError):
                 switch_run("adaptive6", ws, sub_dir, cfg,
                            confirm_fn=lambda _: True,
-                           _check_dirty=lambda d, ps: [])
+                           _is_dirty=self._no_dirty, _reset=self._no_reset)
 
         # First file written must still be present (not rolled back)
         written = list((sub_dir / "pkg/plugins/scorer").glob("*.go"))
         assert len(written) >= 1
-
-    def test_dirty_check_receives_submodule_relative_paths(self, tmp_path):
-        """_check_dirty must be called with the submodule-relative paths, not basenames."""
-        from pipeline.lib.run_manager import switch_run
-        ws, sub_dir, cfg, _ = self._setup(tmp_path,
-            files_created=["pkg/plugins/scorer/adaptive_v2_test.go"],
-            files_modified=["pkg/plugins/scorer/adaptive_v2.go"])
-
-        received = {}
-        def capture_dirty(d, ps):
-            received["submodule_dir"] = d
-            received["paths"] = list(ps)
-            return []
-
-        switch_run("adaptive6", ws, sub_dir, cfg,
-                   confirm_fn=lambda _: True,
-                   _check_dirty=capture_dirty)
-
-        assert received["submodule_dir"] == sub_dir
-        assert "pkg/plugins/scorer/adaptive_v2_test.go" in received["paths"]
-        assert "pkg/plugins/scorer/adaptive_v2.go" in received["paths"]
 
     # ── Validation: run not found ─────────────────────────────────────────────
 
@@ -482,7 +540,7 @@ class TestSwitchRun:
         with pytest.raises(RunNotFoundError, match="not found"):
             switch_run("nope", ws, sub_dir, cfg,
                        confirm_fn=lambda _: True,
-                       _check_dirty=lambda d, ps: [])
+                       _is_dirty=self._no_dirty, _reset=self._no_reset)
 
     # ── Validation: translation_output.json ──────────────────────────────────
 
@@ -493,7 +551,7 @@ class TestSwitchRun:
         with pytest.raises(TranslationOutputError, match="Phase 3"):
             switch_run("adaptive6", ws, sub_dir, cfg,
                        confirm_fn=lambda _: True,
-                       _check_dirty=lambda d, ps: [])
+                       _is_dirty=self._no_dirty, _reset=self._no_reset)
 
     def test_raises_if_translation_output_malformed(self, tmp_path):
         from pipeline.lib.run_manager import switch_run, TranslationOutputError
@@ -502,7 +560,7 @@ class TestSwitchRun:
         with pytest.raises(TranslationOutputError, match="malformed"):
             switch_run("adaptive6", ws, sub_dir, cfg,
                        confirm_fn=lambda _: True,
-                       _check_dirty=lambda d, ps: [])
+                       _is_dirty=self._no_dirty, _reset=self._no_reset)
 
     # ── Validation: basename collision ────────────────────────────────────────
 
@@ -517,7 +575,7 @@ class TestSwitchRun:
         with pytest.raises(ValueError, match="basename collision"):
             switch_run("adaptive6", ws, sub_dir, cfg,
                        confirm_fn=lambda _: True,
-                       _check_dirty=lambda d, ps: [])
+                       _is_dirty=self._no_dirty, _reset=self._no_reset)
 
     # ── Validation: missing source file ──────────────────────────────────────
 
@@ -531,7 +589,7 @@ class TestSwitchRun:
         with pytest.raises(ValueError, match="missing source files"):
             switch_run("adaptive6", ws, sub_dir, cfg,
                        confirm_fn=lambda _: True,
-                       _check_dirty=lambda d, ps: [])
+                       _is_dirty=self._no_dirty, _reset=self._no_reset)
 
     # ── Validation: submodule not found ──────────────────────────────────────
 
@@ -543,31 +601,31 @@ class TestSwitchRun:
         with pytest.raises(RunNotFoundError, match="submodule"):
             switch_run("adaptive6", ws, sub_dir, cfg,
                        confirm_fn=lambda _: True,
-                       _check_dirty=lambda d, ps: [])
+                       _is_dirty=self._no_dirty, _reset=self._no_reset)
 
-    # ── Dirty file handling ───────────────────────────────────────────────────
+    # ── Dirty handling ────────────────────────────────────────────────────────
 
-    def test_dirty_files_confirmed_proceeds(self, tmp_path):
+    def test_dirty_confirmed_proceeds(self, tmp_path):
         from pipeline.lib.run_manager import switch_run
         ws, sub_dir, cfg, _ = self._setup(tmp_path)
-        confirmed = []
-        def confirm(dirty):
-            confirmed.extend(dirty)
+        confirm_called = [False]
+        def confirm(_):
+            confirm_called[0] = True
             return True
 
         result = switch_run("adaptive6", ws, sub_dir, cfg,
                             confirm_fn=confirm,
-                            _check_dirty=lambda d, ps: ["pkg/plugins/scorer/adaptive_v2.go"])
-        assert len(confirmed) == 1
+                            _is_dirty=lambda d: True, _reset=self._no_reset)
+        assert confirm_called[0]
         assert result is not None
 
-    def test_dirty_files_declined_raises_switch_aborted(self, tmp_path):
+    def test_dirty_declined_raises_switch_aborted(self, tmp_path):
         from pipeline.lib.run_manager import switch_run, SwitchAborted
         ws, sub_dir, cfg, _ = self._setup(tmp_path)
         with pytest.raises(SwitchAborted):
             switch_run("adaptive6", ws, sub_dir, cfg,
                        confirm_fn=lambda _: False,
-                       _check_dirty=lambda d, ps: ["pkg/plugins/scorer/adaptive_v2.go"])
+                       _is_dirty=lambda d: True, _reset=self._no_reset)
 
     def test_dirty_declined_does_not_modify_setup_config(self, tmp_path):
         from pipeline.lib.run_manager import switch_run, SwitchAborted
@@ -575,5 +633,19 @@ class TestSwitchRun:
         with pytest.raises(SwitchAborted):
             switch_run("adaptive6", ws, sub_dir, cfg,
                        confirm_fn=lambda _: False,
-                       _check_dirty=lambda d, ps: ["pkg/plugins/scorer/adaptive_v2.go"])
+                       _is_dirty=lambda d: True, _reset=self._no_reset)
         assert json.loads(cfg.read_text())["current_run"] == "other"
+
+    def test_clean_submodule_skips_confirm(self, tmp_path):
+        """confirm_fn must NOT be called when submodule is clean."""
+        from pipeline.lib.run_manager import switch_run
+        ws, sub_dir, cfg, _ = self._setup(tmp_path)
+        confirm_called = [False]
+        def confirm(_):
+            confirm_called[0] = True
+            return True
+
+        switch_run("adaptive6", ws, sub_dir, cfg,
+                   confirm_fn=confirm,
+                   _is_dirty=lambda d: False, _reset=self._no_reset)
+        assert not confirm_called[0]

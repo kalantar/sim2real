@@ -88,11 +88,9 @@ def cmd_inspect(args) -> None:
 
 
 def cmd_switch(args) -> None:
-    def confirm_fn(dirty_files):
-        warn("The following files in llm-d-inference-scheduler have uncommitted changes:")
-        for f in dirty_files:
-            print(f"  {f}")
-        answer = input("Overwrite uncommitted changes? [y/N] ").strip().lower()
+    def confirm_fn(_dirty):
+        warn("llm-d-inference-scheduler has uncommitted changes that will be discarded.")
+        answer = input("Reset all uncommitted changes and switch? [y/N] ").strip().lower()
         return answer == "y"
 
     try:

@@ -229,19 +229,25 @@ def _load_translation_output(run_dir: Path, run_name: str) -> "tuple[list[str], 
     return fc, fm
 
 
-def _git_dirty_default(submodule_dir: Path, paths: "list[str]") -> "list[str]":
-    """Return paths that have uncommitted tracked changes in the submodule."""
-    dirty = []
-    for rel_path in paths:
-        result = subprocess.run(
-            ["git", "-C", str(submodule_dir), "status", "--porcelain", rel_path],
-            capture_output=True, text=True,
-        )
-        line = result.stdout.strip()
-        # '??' prefix = untracked; not considered dirty for our purposes
-        if line and not line.startswith("??"):
-            dirty.append(rel_path)
-    return dirty
+def _git_submodule_is_dirty(submodule_dir: Path) -> bool:
+    """Return True if the submodule has any uncommitted or staged changes."""
+    result = subprocess.run(
+        ["git", "-C", str(submodule_dir), "status", "--porcelain"],
+        capture_output=True, text=True,
+    )
+    return bool(result.stdout.strip())
+
+
+def _git_reset_submodule(submodule_dir: Path) -> None:
+    """Discard all staged and unstaged changes in the submodule."""
+    subprocess.run(
+        ["git", "-C", str(submodule_dir), "restore", "--staged", "."],
+        check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(submodule_dir), "restore", "."],
+        check=True, capture_output=True,
+    )
 
 
 def switch_run(
@@ -250,29 +256,35 @@ def switch_run(
     submodule_dir: Path,
     setup_config_path: Path,
     confirm_fn: "callable",
-    _check_dirty: "callable | None" = None,
+    _is_dirty: "callable | None" = None,
+    _reset: "callable | None" = None,
 ) -> SwitchResult:
     """
-    Switch the active run: validate, copy generated files to submodule, update setup_config.
+    Switch the active run: reset the submodule, delete stale files from the
+    previous run, copy all generated files from the target run, update setup_config.
 
-    confirm_fn(dirty_files: list[str]) -> bool  — called when dirty files found; return True to proceed.
-    _check_dirty(submodule_dir, paths) -> list[str]  — injectable for tests; defaults to git status.
+    confirm_fn(dirty: bool) -> bool  — called when submodule has uncommitted changes;
+        return True to proceed with the reset.
+    _is_dirty(submodule_dir) -> bool  — injectable for tests.
+    _reset(submodule_dir) -> None    — injectable for tests.
 
     Raises: RunNotFoundError, TranslationOutputError, ValueError, SwitchAborted, OSError.
     """
-    if _check_dirty is None:
-        _check_dirty = _git_dirty_default
+    if _is_dirty is None:
+        _is_dirty = _git_submodule_is_dirty
+    if _reset is None:
+        _reset = _git_reset_submodule
 
     run_dir = workspace_dir / "runs" / run_name
 
-    # Step 1: validate and load
+    # Step 1: validate and load target run
     if not run_dir.exists():
         raise RunNotFoundError(f"Error: run '{run_name}' not found in workspace/runs/")
     if not setup_config_path.exists():
         raise RunNotFoundError("Error: workspace/setup_config.json not found")
 
     files_created, files_modified = _load_translation_output(run_dir, run_name)
-    target_files = files_created + files_modified
+    target_files = set(files_created + files_modified)
 
     # Step 2: basename collision check
     seen: set[str] = set()
@@ -285,7 +297,7 @@ def switch_run(
             )
         seen.add(basename)
 
-    # Step 3: pre-validate all source files
+    # Step 3: pre-validate all source files exist in generated/
     generated_dir = run_dir / "generated"
     missing = [Path(f).name for f in target_files
                if not (generated_dir / Path(f).name).exists()]
@@ -301,14 +313,33 @@ def switch_run(
             "Error: submodule directory llm-d-inference-scheduler not found"
         )
 
-    # Step 5: dirty check (immediately before copy)
-    dirty = _check_dirty(submodule_dir, target_files)
-    if dirty and not confirm_fn(dirty):
-        raise SwitchAborted()
+    # Step 5: load previous run's files so we can delete stale ones after reset
+    prev_files: set[str] = set()
+    cfg = json.loads(setup_config_path.read_text())
+    prev_run_name = cfg.get("current_run", "")
+    if prev_run_name and prev_run_name != run_name:
+        prev_run_dir = workspace_dir / "runs" / prev_run_name
+        try:
+            pfc, pfm = _load_translation_output(prev_run_dir, prev_run_name)
+            prev_files = set(pfc + pfm)
+        except (RunNotFoundError, TranslationOutputError):
+            pass  # previous run missing or malformed — skip stale cleanup
 
-    # Step 6: copy files
+    # Step 6: confirm and reset all uncommitted/staged changes
+    if _is_dirty(submodule_dir) and not confirm_fn(True):
+        raise SwitchAborted()
+    _reset(submodule_dir)
+
+    # Step 7: delete files from the previous run that are not in the target run.
+    # These are new/untracked files that git restore won't have cleaned up.
+    for rel_path in prev_files - target_files:
+        stale = submodule_dir / rel_path
+        if stale.exists():
+            stale.unlink()
+
+    # Step 8: copy all generated files to their destinations in the submodule
     files_written: list[str] = []
-    for rel_path in target_files:
+    for rel_path in sorted(target_files):
         src = generated_dir / Path(rel_path).name
         dst = submodule_dir / rel_path
         dst.parent.mkdir(parents=True, exist_ok=True)
@@ -318,8 +349,7 @@ def switch_run(
         except OSError as e:
             raise OSError(f"Error: failed to copy {rel_path}: {e}") from e
 
-    # Step 7: update setup_config only after all copies succeed
-    cfg = json.loads(setup_config_path.read_text())
+    # Step 9: update setup_config only after all copies succeed
     cfg["current_run"] = run_name
     setup_config_path.write_text(json.dumps(cfg, indent=2))
 

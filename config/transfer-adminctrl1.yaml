@@ -28,7 +28,7 @@ baseline:
       So use the same plugin configuration with adaptive admission control for the treatment.
 
 workloads:
-- sim2real_bundle_14b_new/workloads/w3_14b_high_sheddable.yaml
+# - sim2real_bundle_14b_new/workloads/w3_14b_high_sheddable.yaml
 - sim2real_bundle_14b_new/workloads/w1_14b.yaml
 
 hints:
