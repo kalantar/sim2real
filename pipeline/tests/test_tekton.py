@@ -2,8 +2,6 @@
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 
 # ── Fixture: minimal compiled Pipeline dict (mirrors sim2real/pipeline.yaml.j2) ──
 
