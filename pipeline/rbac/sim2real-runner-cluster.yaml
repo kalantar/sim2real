@@ -1,0 +1,23 @@
+# ClusterRole and ClusterRoleBinding granting sim2real-runner read access to
+# nodes — required for the orchestrator's GPU capacity probe (kubectl get nodes).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sim2real-runner-nodes
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sim2real-runner-nodes-${NAMESPACE}
+subjects:
+  - kind: ServiceAccount
+    name: sim2real-runner
+    namespace: ${NAMESPACE}
+roleRef:
+  kind: ClusterRole
+  name: sim2real-runner-nodes
+  apiGroup: rbac.authorization.k8s.io

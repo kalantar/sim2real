@@ -189,3 +189,22 @@ def test_collect_issues_string_coercion():
 def test_collect_issues_ignores_errors():
     reviews = [{"verdict": "ERROR", "issues": []}]
     assert rv.collect_issues(reviews) == []
+
+
+def test_build_user_message_with_context_json():
+    """context_json with text is included in the user message."""
+    import json
+    ctx = json.dumps({"text": "Modify scorer X"})
+    msg = rv.build_user_message("package p", "func algo(){}", None,
+                                 "# Context", "kind: Scorer", 1,
+                                 context_json=ctx)
+    assert "Modify scorer X" in msg
+    assert "Transfer Context" in msg
+
+
+def test_build_user_message_context_json_none():
+    """context_json=None produces no extra section."""
+    msg = rv.build_user_message("package p", "func algo(){}", None,
+                                 "# Context", "kind: Scorer", 1,
+                                 context_json=None)
+    assert "operator" not in msg

@@ -17,11 +17,6 @@ from pipeline.lib.run_manager import (
 )
 
 # ── Repo layout ───────────────────────────────────────────────────────────────
-REPO_ROOT = Path(__file__).resolve().parent.parent
-WORKSPACE_DIR = REPO_ROOT / "workspace"
-SETUP_CONFIG = WORKSPACE_DIR / "setup_config.json"
-SUBMODULE_DIR = REPO_ROOT / "llm-d-inference-scheduler"
-
 # ── Color helpers ─────────────────────────────────────────────────────────────
 _tty = sys.stdout.isatty()
 
@@ -36,8 +31,8 @@ def err(msg: str)  -> None: print(_c("31", "[ERROR] ") + msg, file=sys.stderr)
 
 # ── Subcommand handlers ───────────────────────────────────────────────────────
 
-def cmd_list(_args) -> None:
-    runs = list_runs(WORKSPACE_DIR, SETUP_CONFIG)
+def cmd_list(_args, workspace_dir: Path, setup_config: Path) -> None:
+    runs = list_runs(workspace_dir, setup_config)
     fmt = "{:<14} {:<28} {:<12} {:<22} {}"
     print(fmt.format("NAME", "SCENARIO", "PHASE", "VERDICT", "ACTIVE"))
     for r in runs:
@@ -45,15 +40,15 @@ def cmd_list(_args) -> None:
                          "*" if r.active else ""))
 
 
-def cmd_inspect(args) -> None:
+def cmd_inspect(args, workspace_dir: Path, setup_config: Path) -> None:
     active_run = ""
-    if SETUP_CONFIG.exists():
+    if setup_config.exists():
         try:
-            active_run = json.loads(SETUP_CONFIG.read_text()).get("current_run", "")
+            active_run = json.loads(setup_config.read_text()).get("current_run", "")
         except (json.JSONDecodeError, OSError):
             pass
 
-    run_dir = WORKSPACE_DIR / "runs" / args.name
+    run_dir = workspace_dir / "runs" / args.name
     try:
         detail = inspect_run(run_dir, active_run=active_run)
     except RunNotFoundError as e:
@@ -87,7 +82,7 @@ def cmd_inspect(args) -> None:
             print(f"  {stage:<10} {status}{extra}")
 
 
-def cmd_switch(args) -> None:
+def cmd_switch(args, workspace_dir: Path, submodule_dir: Path, setup_config: Path) -> None:
     def confirm_fn(_dirty):
         warn("llm-d-inference-scheduler has uncommitted changes that will be discarded.")
         answer = input("Reset all uncommitted changes and switch? [y/N] ").strip().lower()
@@ -95,7 +90,7 @@ def cmd_switch(args) -> None:
 
     try:
         result = switch_run(
-            args.name, WORKSPACE_DIR, SUBMODULE_DIR, SETUP_CONFIG, confirm_fn
+            args.name, workspace_dir, submodule_dir, setup_config, confirm_fn
         )
     except (RunNotFoundError, TranslationOutputError, ValueError) as e:
         err(str(e))
@@ -121,11 +116,15 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python pipeline/run.py list              # show all runs with status
-  python pipeline/run.py inspect adaptive6 # show run details
-  python pipeline/run.py switch admin5     # switch active run, sync submodule
+  python pipeline/run.py list                                        # show all runs
+  python pipeline/run.py --experiment-root ../admission-control list
+  python pipeline/run.py inspect adaptive6                          # show run details
+  python pipeline/run.py switch admin5                              # sync submodule artifacts
 """,
     )
+    p.add_argument("--experiment-root", metavar="PATH", dest="experiment_root",
+                   help="Root of the experiment repo (default: current directory)")
+
     sub = p.add_subparsers(dest="command")
 
     sub.add_parser("list", help="List all conforming runs")
@@ -133,7 +132,7 @@ Examples:
     inspect_p = sub.add_parser("inspect", help="Show full details of a run")
     inspect_p.add_argument("name", metavar="NAME", help="Run name")
 
-    switch_p = sub.add_parser("switch", help="Switch active run and sync submodule artifacts")
+    switch_p = sub.add_parser("switch", help="Switch active run and sync scorer plugin files")
     switch_p.add_argument("name", metavar="NAME", help="Run name to switch to")
 
     return p
@@ -143,12 +142,19 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
+    experiment_root = (
+        Path(args.experiment_root).resolve() if args.experiment_root else Path.cwd()
+    )
+    workspace_dir = experiment_root / "workspace"
+    submodule_dir = experiment_root / "llm-d-inference-scheduler"
+    setup_config = workspace_dir / "setup_config.json"
+
     if args.command == "list":
-        cmd_list(args)
+        cmd_list(args, workspace_dir, setup_config)
     elif args.command == "inspect":
-        cmd_inspect(args)
+        cmd_inspect(args, workspace_dir, setup_config)
     elif args.command == "switch":
-        cmd_switch(args)
+        cmd_switch(args, workspace_dir, submodule_dir, setup_config)
     else:
         parser.print_help()
         sys.exit(1)

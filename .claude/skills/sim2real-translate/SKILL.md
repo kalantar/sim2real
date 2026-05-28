@@ -7,7 +7,7 @@ description: |
   deep repo exploration in parallel with writer/reviewer initialization, then
   the writer owns the translate loop, build/test gate, and review rounds.
   Use after prepare.py reaches the translation checkpoint.
-argument-hint: "[--rounds N] [--rebuild-context]"
+argument-hint: "[--experiment-root PATH] [--rounds N] [--rebuild-context]"
 user-invocable: true
 allowed-tools:
   - Agent
@@ -36,28 +36,32 @@ that is exceptionally critical and includes assembly simulation checks.
 
 ## CRITICAL: Working Directory
 
-**All commands in this skill must run from the `sim2real/` root directory.**
-The target production repo (e.g., `llm-d-inference-scheduler/`) is a submodule.
-Run commands there via subshell: `(cd llm-d-inference-scheduler && ...)`
+Run from the **experiment repo root** (where `transfer.yaml`, `algorithm/`, and
+`llm-d-inference-scheduler/` live) OR from any directory with `--experiment-root PATH`.
+The `sim2real/` pipeline root is discovered automatically from `setup_config.json`.
 
-Before each major step, verify:
+Target repo commands run via subshell: `(cd $TARGET_REPO && ...)`
+
+Before each major step, verify the experiment root has the expected layout:
 ```bash
-test -f config/env_defaults.yaml || { echo "ERROR: not in sim2real root"; exit 1; }
+test -f "$EXPERIMENT_ROOT/workspace/setup_config.json" || { echo "ERROR: no setup_config.json in $EXPERIMENT_ROOT/workspace/"; exit 1; }
 ```
 
 ## Arguments
 
+- `--experiment-root PATH` — Path to experiment repo (default: current working directory)
 - `--rounds N` — Max review rounds (default: 3)
 - `--rebuild-context` — Force context reassembly even if cache exists
 
 Initialize shell variables from skill invocation arguments:
 
 ```bash
-REPO_ROOT=$(pwd)      # sim2real repo root
-REVIEW_ROUNDS=3       # override with --rounds N
-REBUILD_CONTEXT=false # set true with --rebuild-context
+EXPERIMENT_ROOT=$(pwd)  # overridden by --experiment-root PATH
+REVIEW_ROUNDS=3         # override with --rounds N
+REBUILD_CONTEXT=false   # set true with --rebuild-context
 ```
 
+If `--experiment-root PATH` was passed, set `EXPERIMENT_ROOT=$(realpath PATH)`.
 If `--rounds N` was passed, set `REVIEW_ROUNDS=N`. If `--rebuild-context` was
 passed, set `REBUILD_CONTEXT=true`.
 
@@ -68,27 +72,63 @@ Use TaskCreate to create an overall progress task:
 TaskCreate subject="sim2real-translate: $RUN_NAME" description="Running translation skill"
 ```
 
-Read current run directory:
+Load `setup_config.json` and derive `REPO_ROOT` and `RUN_DIR`:
 
 ```bash
-RUN_DIR=$(python3 -c "
+python3 -c "
 import json, sys, os
-config_path = 'workspace/setup_config.json'
-if not os.path.exists(config_path):
-    print('HALT: workspace/setup_config.json not found. Run /sim2real-setup first.', file=sys.stderr)
-    sys.exit(1)
-config = json.load(open(config_path))
-run_name = config.get('current_run', '')
+from pathlib import Path
+
+exp = os.environ.get('EXPERIMENT_ROOT', os.getcwd())
+ws = Path(exp) / 'workspace'
+
+# --- current_run: setup_config.json or latest run with skill_input.json ---
+config_path = ws / 'setup_config.json'
+run_name = ''
+repo_root = ''
+if config_path.exists():
+    cfg = json.loads(config_path.read_text())
+    run_name = cfg.get('current_run', '')
+    repo_root = cfg.get('sim2real_root', '')
+
 if not run_name:
-    print('HALT: No current_run in setup_config.json.', file=sys.stderr)
+    runs_dir = ws / 'runs'
+    if runs_dir.exists():
+        candidates = sorted(
+            [d for d in runs_dir.iterdir()
+             if d.is_dir() and (d / 'skill_input.json').exists()],
+            key=lambda d: d.stat().st_mtime, reverse=True
+        )
+        if candidates:
+            run_name = candidates[0].name
+
+if not run_name:
+    print('HALT: No run with skill_input.json found in workspace/runs/. Run pipeline/prepare.py first.', file=sys.stderr)
     sys.exit(1)
-run_dir = f'workspace/runs/{run_name}'
-if not os.path.exists(f'{run_dir}/skill_input.json'):
-    print(f'HALT: {run_dir}/skill_input.json not found. Run prepare.py first.', file=sys.stderr)
+
+run_dir = ws / 'runs' / run_name
+if not (run_dir / 'skill_input.json').exists():
+    print(f'HALT: {run_dir}/skill_input.json not found. Run pipeline/prepare.py first.', file=sys.stderr)
     sys.exit(1)
-print(run_dir)
-")
+
+# --- sim2real root: setup_config.json > SIM2REAL_ROOT env > error ---
+if not repo_root:
+    repo_root = os.environ.get('SIM2REAL_ROOT', '')
+if not repo_root or not Path(repo_root).exists():
+    print('HALT: Cannot determine sim2real repo root.', file=sys.stderr)
+    print('  Fix A: Run pipeline/setup.py first (records sim2real_root in workspace/setup_config.json)', file=sys.stderr)
+    print('  Fix B: Set SIM2REAL_ROOT env var: export SIM2REAL_ROOT=/path/to/sim2real', file=sys.stderr)
+    sys.exit(1)
+
+print(f'RUN_DIR={run_dir}')
+print(f'REPO_ROOT={repo_root}')
+" | tee /tmp/translate_prereq.txt
+test $? -eq 0 || exit 1
+
+RUN_DIR=$(grep '^RUN_DIR=' /tmp/translate_prereq.txt | cut -d= -f2-)
+REPO_ROOT=$(grep '^REPO_ROOT=' /tmp/translate_prereq.txt | cut -d= -f2-)
 test -n "$RUN_DIR" || exit 1
+test -n "$REPO_ROOT" || exit 1
 ```
 
 Validate and load `skill_input.json`:
@@ -99,7 +139,7 @@ import json, sys
 si = json.load(open('$RUN_DIR/skill_input.json'))
 required = ['run_name', 'run_dir', 'scenario', 'context_path', 'manifest_path',
             'algorithm_source', 'baseline_sim_config',
-            'target', 'build_commands', 'config_kind', 'hints']
+            'target', 'build_commands', 'config_kind', 'context']
 missing = [f for f in required if f not in si]
 if missing:
     print(f'HALT: skill_input.json missing fields: {missing}')
@@ -111,28 +151,21 @@ print(f'Loaded: run={si[\"run_name\"]} scenario={si[\"scenario\"]} config_kind={
 " || exit 1
 ```
 
-Load into shell variables:
+Load into shell variables. All paths in `skill_input.json` are relative to
+`$EXPERIMENT_ROOT`; prefix each with `$EXPERIMENT_ROOT/` to get absolute paths:
 
 ```bash
 RUN_NAME=$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json'))['run_name'])")
 SCENARIO=$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json'))['scenario'])")
-CONTEXT_PATH=$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json'))['context_path'])")
-MANIFEST_PATH=$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json'))['manifest_path'])")
-ALGO_SOURCE=$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json'))['algorithm_source'])")
-ALGO_CONFIG=$(python3 -c "import json; v=json.load(open('$RUN_DIR/skill_input.json')).get('algorithm_config'); print(v or '')")
-TARGET_REPO=$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json'))['target']['repo'])")
+CONTEXT_PATH=$EXPERIMENT_ROOT/$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json'))['context_path'])")
+MANIFEST_PATH=$EXPERIMENT_ROOT/$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json'))['manifest_path'])")
+ALGO_SOURCE=$EXPERIMENT_ROOT/$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json'))['algorithm_source'])")
+ALGO_CONFIG=$(python3 -c "import json; v=json.load(open('$RUN_DIR/skill_input.json')).get('algorithm_config'); print('$EXPERIMENT_ROOT/' + v if v else '')")
+TARGET_REPO=$EXPERIMENT_ROOT/$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json'))['target']['repo'])")
 CONFIG_KIND=$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json'))['config_kind'])")
-HINTS_TEXT=$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json')).get('hints', {}).get('text', ''))")
-HINTS_FILES_CONTENT=$(python3 -c "
-import json
-hints = json.load(open('$RUN_DIR/skill_input.json')).get('hints', {}).get('files', [])
-for f in hints:
-    print(f'### {f[\"path\"]}')
-    print(f['content'])
-    print()
-")
-BASELINE_SIM_CONFIG=$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json'))['baseline_sim_config'])")
-BASELINE_REAL_CONFIG=$(python3 -c "import json; v=json.load(open('$RUN_DIR/skill_input.json')).get('baseline_real_config'); print(v if v else 'null')")
+CONTEXT_TEXT=$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json')).get('context', {}).get('text', ''))")
+BASELINE_SIM_CONFIG=$(python3 -c "import json; v=json.load(open('$RUN_DIR/skill_input.json'))['baseline_sim_config']; print('$EXPERIMENT_ROOT/' + v if v else '')")
+BASELINE_REAL_CONFIG=$(python3 -c "import json; v=json.load(open('$RUN_DIR/skill_input.json')).get('baseline_real_config'); print('$EXPERIMENT_ROOT/' + v if v else 'null')")
 BASELINE_REAL_NOTES=$(python3 -c "import json; print(json.load(open('$RUN_DIR/skill_input.json')).get('baseline_real_notes', ''))")
 ```
 
@@ -227,49 +260,46 @@ print(f'context_file_populated={str(ctx.get(\"context_file_populated\", False)).
 yet. Run it now:
 
 ```bash
-python3 pipeline/prepare.py context
+python3 $REPO_ROOT/pipeline/prepare.py context
 echo "Context file prepared."
 ```
 
 **If `context_file_populated=false` (always true after a fresh prepare.py run):**
-assemble the full structured context document directly in the current session.
+enrich the existing context document with production interfaces from the target repo.
 
-Read these files using the Read tool:
+The context file at `$CONTEXT_PATH` already contains content assembled by `prepare.py`
+from the manifest's `context.files` (e.g., README.md, config.md). This content includes
+deployment guidance, signal mapping, InferenceObjectives, and other scenario-specific
+details that the writer depends on. **Do not overwrite it.**
 
-1. All files listed in `manifest["context"]["files"]` — read each one in full
-2. Production interfaces for `$SCENARIO` from `$TARGET_REPO` — explore `$TARGET_REPO/pkg/plugins/`
-   to find the relevant interface definitions:
+Read the existing file, then **append** the following sections to it using the Edit tool
+(append at end of file). Explore `$TARGET_REPO` to gather the content for each section:
+
+1. Production interfaces for `$SCENARIO` — explore the target repo to find the relevant
+   interface definitions:
    - routing → `Scorer` interface, `EndpointPickerConfig`, `SchedulingContext`
    - admission_control → `Admission` interface, `AdmissionPolicyConfig`
-   Read from the actual `.go` source files in that directory.
-3. One or two representative example plugins from the same directory — read in full
-4. Plugin registration pattern: explore `$TARGET_REPO` to discover the registration file
-   (typically a `register.go` or `plugins.go`) and read it in full
+   - flowcontrol → `UsageLimitPolicy` interface, `SaturationDetector`
+   Read from the actual `.go` source files.
+2. One or two representative example plugins from the same directory — read in full
+3. Plugin registration pattern: explore `$TARGET_REPO` to discover the registration file
+   (typically `runner.go` or `register.go`) and read the relevant section
 
-Then use the Write tool to write `$CONTEXT_PATH` with this structure:
+Append these sections to `$CONTEXT_PATH`:
 
 ```
-# Translation Context
-Scenario: $SCENARIO | inference-sim@<sha> | llm-d@<sha>
-
-## Signal Mapping
-[full contents of mapping document]
-
 ## Production Interfaces
-[Scorer/Admission interface, EndpointPickerConfig, SchedulingContext
- — extracted verbatim from source, not paraphrased]
+[Interface definitions extracted verbatim from source, not paraphrased]
 
 ## Example Plugin: <filename>
-[full contents]
+[full contents of a representative plugin in the same category]
 
 ## Plugin Registration
-[full contents of the discovered registration file]
-
-## <any additional manifest context file>
-[full contents]
+[registration pattern showing how plugins are registered]
 ```
 
-Do NOT include hints in the context file — hints are held in session memory via $HINTS_TEXT and $HINTS_FILES_CONTENT.
+Do NOT include context.text in the context file — it is held in session memory via $CONTEXT_TEXT.
+Do NOT rewrite the file header or existing content — only append new sections.
 
 Verify the file was written:
 
@@ -281,11 +311,17 @@ Mark context as populated in state:
 
 ```bash
 python3 -c "
-import sys
-sys.path.insert(0, '$REPO_ROOT')
-from pipeline.lib.state_machine import StateMachine
-state = StateMachine.load('$RUN_DIR')
-state.update('context', context_file_populated=True)
+import json, tempfile
+from pathlib import Path
+from datetime import datetime, timezone
+
+state_path = Path('$RUN_DIR') / '.state.json'
+state = json.loads(state_path.read_text())
+state.setdefault('phases', {}).setdefault('context', {})['context_file_populated'] = True
+fd, tmp = tempfile.mkstemp(dir='$RUN_DIR', suffix='.tmp')
+import os; os.close(fd)
+Path(tmp).write_text(json.dumps(state, indent=2))
+Path(tmp).replace(state_path)
 print('State updated: context_file_populated=true')
 "
 ```
@@ -306,19 +342,30 @@ print(json.dumps(si.get('build_commands', [])))
 ")
 ```
 
-Read the three prompt templates and construct agent prompts by substituting
-all `{PLACEHOLDER}` values with the corresponding shell variables
-(`{REPO_ROOT}` → `$REPO_ROOT`, `{RUN_DIR}` → `$RUN_DIR`, `{CONTEXT_PATH}` →
-`$CONTEXT_PATH`, `{ALGO_SOURCE}` → `$ALGO_SOURCE`, `{ALGO_CONFIG}` →
-`$ALGO_CONFIG`, `{BASELINE_SIM_CONFIG}` → `$BASELINE_SIM_CONFIG`,
-`{BASELINE_REAL_CONFIG}` → `$BASELINE_REAL_CONFIG`,
-`{BASELINE_REAL_NOTES}` → `$BASELINE_REAL_NOTES`,
-`{EXPERT_AGENT_NAME}` → `"expert"`,
-`{TARGET_REPO}` → `$TARGET_REPO`, `{CONFIG_KIND}` →
-`$CONFIG_KIND`, `{REVIEW_ROUNDS}` → `$REVIEW_ROUNDS`, `{SCENARIO}` →
-`$SCENARIO`, `{BUILD_COMMANDS}` → `$BUILD_COMMANDS`, `{HINTS_TEXT}` →
-`$HINTS_TEXT`, `{HINTS_FILES_CONTENT}` → `$HINTS_FILES_CONTENT`,
-`{MAIN_SESSION_NAME}` → `"main-session"`).
+Read the three prompt templates from the skill's prompts/ directory:
+- `$REPO_ROOT/.claude/skills/sim2real-translate/prompts/agent-expert.md`
+- `$REPO_ROOT/.claude/skills/sim2real-translate/prompts/agent-writer.md`
+- `$REPO_ROOT/.claude/skills/sim2real-translate/prompts/agent-reviewer.md`
+
+Construct agent prompts by substituting all `{PLACEHOLDER}` values with the
+corresponding shell variables:
+- `{REPO_ROOT}` → `$REPO_ROOT`
+- `{EXPERIMENT_ROOT}` → `$EXPERIMENT_ROOT`
+- `{RUN_DIR}` → `$RUN_DIR`
+- `{CONTEXT_PATH}` → `$CONTEXT_PATH`
+- `{ALGO_SOURCE}` → `$ALGO_SOURCE`
+- `{ALGO_CONFIG}` → `$ALGO_CONFIG`
+- `{BASELINE_SIM_CONFIG}` → `$BASELINE_SIM_CONFIG`
+- `{BASELINE_REAL_CONFIG}` → `$BASELINE_REAL_CONFIG`
+- `{BASELINE_REAL_NOTES}` → `$BASELINE_REAL_NOTES`
+- `{EXPERT_AGENT_NAME}` → `"expert"`
+- `{TARGET_REPO}` → `$TARGET_REPO`
+- `{CONFIG_KIND}` → `$CONFIG_KIND`
+- `{REVIEW_ROUNDS}` → `$REVIEW_ROUNDS`
+- `{SCENARIO}` → `$SCENARIO`
+- `{BUILD_COMMANDS}` → `$BUILD_COMMANDS`
+- `{CONTEXT_TEXT}` → `$CONTEXT_TEXT`
+- `{MAIN_SESSION_NAME}` → `"main-session"`
 
 Use TeamCreate to create the team:
 ```
@@ -329,15 +376,15 @@ TeamCreate(team_name="translate-$RUN_NAME", description="sim2real expert+writer+
 Issue three Agent tool calls at once — do not wait between them:
 
 1. Agent(name="expert", team_name="translate-$RUN_NAME", run_in_background=true,
-         subagent_type=general-purpose,
+         subagent_type=general-purpose, model="opus",
          prompt=<substituted agent-expert.md>)
 
 2. Agent(name="reviewer", team_name="translate-$RUN_NAME", run_in_background=true,
-         subagent_type=general-purpose,
+         subagent_type=general-purpose, model="opus",
          prompt=<substituted agent-reviewer.md>)
 
 3. Agent(name="writer", team_name="translate-$RUN_NAME",
-         subagent_type=general-purpose,
+         subagent_type=general-purpose, model="opus",
          prompt=<substituted agent-writer.md>)
 
 All three start simultaneously. Expert and Reviewer initialize in the background while
@@ -364,11 +411,20 @@ SendMessage("writer", "feedback: <user feedback text>")
 If "done":
 ```bash
 python3 -c "
-import sys
-sys.path.insert(0, '$REPO_ROOT')
-from pipeline.lib.state_machine import StateMachine
-state = StateMachine.load('$RUN_DIR')
-state.update('baseline_derivation', status='done', user_approved=True)
+import json, tempfile
+from pathlib import Path
+from datetime import datetime, timezone
+
+state_path = Path('$RUN_DIR') / '.state.json'
+state = json.loads(state_path.read_text())
+state.setdefault('phases', {})['baseline_derivation'] = {
+    'status': 'done', 'user_approved': True,
+    'timestamp': datetime.now(timezone.utc).isoformat()
+}
+fd, tmp = tempfile.mkstemp(dir='$RUN_DIR', suffix='.tmp')
+import os; os.close(fd)
+Path(tmp).write_text(json.dumps(state, indent=2))
+Path(tmp).replace(state_path)
 print('State: baseline_derivation done')
 "
 SendMessage("writer", "continue")
@@ -388,11 +444,20 @@ Provide feedback to revise, or type 'done' to proceed.
 Handle feedback / continue as for `baseline-ready:`. On continue, update state:
 ```bash
 python3 -c "
-import sys
-sys.path.insert(0, '$REPO_ROOT')
-from pipeline.lib.state_machine import StateMachine
-state = StateMachine.load('$RUN_DIR')
-state.update('treatment_derivation', status='done', user_approved=True)
+import json, tempfile
+from pathlib import Path
+from datetime import datetime, timezone
+
+state_path = Path('$RUN_DIR') / '.state.json'
+state = json.loads(state_path.read_text())
+state.setdefault('phases', {})['treatment_derivation'] = {
+    'status': 'done', 'user_approved': True,
+    'timestamp': datetime.now(timezone.utc).isoformat()
+}
+fd, tmp = tempfile.mkstemp(dir='$RUN_DIR', suffix='.tmp')
+import os; os.close(fd)
+Path(tmp).write_text(json.dumps(state, indent=2))
+Path(tmp).replace(state_path)
 print('State: treatment_derivation done')
 "
 SendMessage("writer", "continue")
@@ -507,38 +572,39 @@ print(len(list((Path('$RUN_DIR/review')).glob('round_*.json'))))
 " 2>/dev/null || echo 0)
 ```
 
-Copy all created/modified files + treatment_config.yaml into `$RUN_DIR/generated/`:
+Derive file lists from git state, overwrite `translation_output.json`, and copy to `$RUN_DIR/generated/`:
 
 ```bash
 python3 -c "
-import json, shutil
-from pathlib import Path
-o = json.load(open('$RUN_DIR/translation_output.json'))
-gen = Path('$RUN_DIR/generated')
-gen.mkdir(parents=True, exist_ok=True)
-target = Path('$TARGET_REPO')
-for f in o['files_created'] + o.get('files_modified', []):
-    src = target / f
-    dst = gen / Path(f).name
-    shutil.copy2(src, dst)
-    print(f'  {Path(f).name} → generated/')
-print('Generated artifacts ready.')
-"
+import sys
+sys.path.insert(0, '$REPO_ROOT/.claude/skills/sim2real-translate/scripts')
+from copy_generated import copy_generated
+copy_generated('$TARGET_REPO', '$RUN_DIR')
+" || exit 1
 ```
 
 Update `.state.json`:
 
 ```bash
 python3 -c "
-import json, sys
-sys.path.insert(0, '$REPO_ROOT')
-from pipeline.lib.state_machine import StateMachine
+import json, tempfile
+from pathlib import Path
+from datetime import datetime, timezone
+
+state_path = Path('$RUN_DIR') / '.state.json'
+state = json.loads(state_path.read_text())
 o = json.load(open('$RUN_DIR/translation_output.json'))
-state = StateMachine.load('$RUN_DIR')
-state.mark_done('translate',
-    files=o['files_created'],
-    review_rounds=$REVIEW_ROUNDS_DONE,
-    consensus='$FINAL_CONSENSUS')
+state.setdefault('phases', {})['translate'] = {
+    'status': 'done',
+    'timestamp': datetime.now(timezone.utc).isoformat(),
+    'files': o['files_created'],
+    'review_rounds': $REVIEW_ROUNDS_DONE,
+    'consensus': '$FINAL_CONSENSUS',
+}
+fd, tmp = tempfile.mkstemp(dir='$RUN_DIR', suffix='.tmp')
+import os; os.close(fd)
+Path(tmp).write_text(json.dumps(state, indent=2))
+Path(tmp).replace(state_path)
 print('State updated: translate done')
 "
 ```
@@ -551,7 +617,7 @@ import json, sys
 from pathlib import Path
 o = json.load(open('$RUN_DIR/translation_output.json'))
 required = ['plugin_type', 'files_created', 'files_modified', 'package',
-            'register_file', 'test_commands', 'config_kind', 'helm_path',
+            'register_file', 'test_commands', 'config_kind',
             'treatment_config_generated', 'description']
 missing = [f for f in required if f not in o]
 if missing:
@@ -592,7 +658,8 @@ Output artifacts:
   $RUN_DIR/review/
 
 Next: re-run prepare.py to continue through Assembly, Summary, and Gate.
-  python pipeline/prepare.py
+  python3 $REPO_ROOT/pipeline/prepare.py
+  (or: cd $EXPERIMENT_ROOT && python3 $REPO_ROOT/pipeline/prepare.py)
 ```
 
 Shut down the agent team:
@@ -605,7 +672,7 @@ TeamDelete()
 
 ## What This Skill Does NOT Do
 
-- Does not assemble values.yaml or cluster YAMLs (prepare.py Phase 4)
-- Does not touch env_defaults.yaml or cluster config
+- Does not assemble resolved scenarios or cluster YAMLs (prepare.py Phase 4)
+- Does not touch cluster config or bundle inputs (baseline.yaml, treatment.yaml)
 - Does not generate run_summary.md or perform the human gate
 - Job: produce working, reviewed Go code + treatment config + metadata in generated/

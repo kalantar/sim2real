@@ -1,0 +1,28 @@
+# Additional namespace-scoped permissions for the sim2real-runner SA:
+# - PVC and Secret read access for orchestrator slot health checks.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sim2real-runner-ns
+  namespace: ${NAMESPACE}
+rules:
+  - apiGroups: ["tekton.dev"]
+    resources: ["pipelineruns"]
+    verbs: ["create", "get", "watch", "list", "delete", "patch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims", "secrets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sim2real-runner-ns
+  namespace: ${NAMESPACE}
+subjects:
+  - kind: ServiceAccount
+    name: sim2real-runner
+    namespace: ${PRIMARY_NAMESPACE}
+roleRef:
+  kind: Role
+  name: sim2real-runner-ns
+  apiGroup: rbac.authorization.k8s.io

@@ -14,19 +14,27 @@ from pathlib import Path
 @dataclass
 class SetupConfig:
     namespace: str
+    namespaces: list[str]
     registry: str
     repo_name: str
     run_name: str
     hf_token: str
+    github_token: str
     registry_user: str
     registry_token: str
     storage_class: str
     is_openshift: bool
     no_cluster: bool
+    pipeline_yaml: str | None = None
+    orchestrator_image: str = ""
 
 # ── Repo layout ──────────────────────────────────────────────────────
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TEKTONC_DIR = REPO_ROOT / "tektonc-data-collection"
+_DEFAULT_HF_SECRET_NAME = "hf-secret"
+
+# Overridden in main() when --experiment-root is specified.
+EXPERIMENT_ROOT = REPO_ROOT
 
 # ── Color helpers ────────────────────────────────────────────────────
 _tty = sys.stdout.isatty()
@@ -49,7 +57,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Environment variables (alternatives to --flags):
-  NAMESPACE, HF_TOKEN, QUAY_ROBOT_USERNAME, QUAY_ROBOT_TOKEN, GITHUB_TOKEN
+  NAMESPACE, HF_TOKEN, REGISTRY_USER, REGISTRY_TOKEN, GITHUB_TOKEN
 
 Examples:
   python pipeline/setup.py                         # fully interactive
@@ -60,22 +68,33 @@ Examples:
 """,
     )
     p.add_argument("--namespace",      metavar="NS",    help="Kubernetes namespace")
+    p.add_argument("--namespaces",     metavar="NS1,NS2,...",
+                                       help="Comma-separated list of namespaces to provision (overrides --namespace)")
     p.add_argument("--hf-token",       metavar="TOKEN", help="HuggingFace API token")
+    p.add_argument("--github-token",   metavar="TOKEN", help="GitHub token for private repo access")
     p.add_argument("--registry",       metavar="REG",   help="Container registry host (e.g. quay.io/username)")
     p.add_argument("--repo-name",      metavar="NAME",  default=None,
                                                         help="Registry repository name [llm-d-inference-scheduler]")
-    p.add_argument("--registry-user",  metavar="USER",  help="Registry robot username")
-    p.add_argument("--registry-token", metavar="TOKEN", help="Registry robot token")
+    p.add_argument("--registry-user",  metavar="USER",  help="Registry username")
+    p.add_argument("--registry-token", metavar="TOKEN", help="Registry token")
     p.add_argument("--storage-class",  metavar="SC",    help="PVC storageClassName (auto-detected for OpenShift)")
     p.add_argument("--run",            metavar="NAME",  help="Run name [sim2real-YYYY-MM-DD]")
+    p.add_argument("--experiment-root", metavar="PATH", dest="experiment_root",
+                   help="Root of the experiment repo (default: framework directory)")
     p.add_argument("--no-cluster",      action="store_true",
                                        help="Skip all kubectl/tkn steps (config + JSON output only)")
+    p.add_argument("--pipeline-yaml",  metavar="PATH",
+                                       help="Path to Tekton Pipeline YAML to apply "
+                                            "(default: <repo-root>/pipeline/pipeline.yaml)")
     p.add_argument("--redeploy-tasks", action="store_true",
                                        help="Re-apply Tekton step/task YAMLs only (requires --namespace)")
     p.add_argument("--test-push",      action="store_true",
                                        help="Auto-accept test push prompt")
     p.add_argument("--test-push-tag",  metavar="TAG",   default="_test-image-push",
                                        help="Image tag for test push [%(default)s]")
+    p.add_argument("--orchestrator-image", metavar="IMAGE",
+                                       help="Orchestrator container image for --remote mode "
+                                            "(e.g. ghcr.io/inference-sim/sim2real/orchestrator:latest)")
     return p
 
 def run(cmd: list[str], *, check: bool = True, capture: bool = False,
@@ -99,7 +118,7 @@ def prompt(var_name: str, message: str, default: str = "", env_var: str = "") ->
 def prompt_secret(message: str, env_var: str = "") -> str:
     """Return env var value, or prompt with hidden input.
 
-    At the prompt the user may also type an env var name (e.g. QUAY_ROBOT_TOKEN)
+    At the prompt the user may also type an env var name (e.g. REGISTRY_TOKEN)
     instead of the secret itself — the script will resolve it from the environment.
     Character count is printed after entry so the user can confirm input was received.
     """
@@ -154,7 +173,7 @@ def _resolve_run_name(args: argparse.Namespace) -> tuple[str, Path]:
     run_name = args.run or prompt("run_name", "Enter a name for this run", default=default)
 
     while True:
-        run_dir = REPO_ROOT / "workspace" / "runs" / run_name
+        run_dir = EXPERIMENT_ROOT / "workspace" / "runs" / run_name
         if run_dir.exists():
             warn(f"Run '{run_name}' already exists at {run_dir}")
             answer = prompt("overwrite", "Overwrite it, or enter a new name? [overwrite/NAME]",
@@ -229,17 +248,27 @@ def collect_config(args: argparse.Namespace) -> tuple[SetupConfig, Path, str]:
     step(1, 8, "Configuration")
 
     # Load prior config for defaults
-    config_path = REPO_ROOT / "workspace" / "setup_config.json"
+    config_path = EXPERIMENT_ROOT / "workspace" / "setup_config.json"
     defaults = json.loads(config_path.read_text()) if config_path.exists() else {}
     if defaults:
         info("Loading defaults from previous setup_config.json")
 
-    # Namespace
-    ns_default = defaults.get("namespace", "sim2real-" + os.environ.get("USER", "dev"))
-    namespace = args.namespace or prompt("namespace", "Kubernetes namespace",
-                                        default=ns_default, env_var="NAMESPACE")
-    if not namespace:
-        err("NAMESPACE is required"); sys.exit(1)
+    # Resolve namespace list
+    namespaces_raw = args.namespaces or os.environ.get("NAMESPACES", "")
+    if namespaces_raw:
+        namespaces = [n.strip() for n in namespaces_raw.split(",") if n.strip()]
+        if not namespaces:
+            err("--namespaces produced an empty list"); sys.exit(1)
+        namespace = namespaces[0]
+    else:
+        ns_default = defaults.get("namespace", "sim2real-" + os.environ.get("USER", "dev"))
+        ns_input = args.namespace or prompt("namespace",
+                                            "Kubernetes namespace(s) (comma-separated for multiple)",
+                                            default=ns_default, env_var="NAMESPACE")
+        if not ns_input:
+            err("NAMESPACE is required"); sys.exit(1)
+        namespaces = [n.strip() for n in ns_input.split(",") if n.strip()]
+        namespace = namespaces[0]
 
     # Registry
     reg_default = defaults.get("registry", "")
@@ -265,10 +294,13 @@ def collect_config(args: argparse.Namespace) -> tuple[SetupConfig, Path, str]:
     # HuggingFace token — empty string means "reuse existing secret" (checked in step_secrets)
     hf_token = args.hf_token or prompt_secret("HuggingFace token", env_var="HF_TOKEN")
 
+    # GitHub token — used by install-llmdbenchmark to clone repos
+    gh_token = args.github_token or os.environ.get("GITHUB_TOKEN", "")
+
     # Registry credentials — resolve from args > env > ghcr.io fallback > prompt
     docker_server = registry.split("/")[0] if registry else ""
-    reg_user = args.registry_user or os.environ.get("QUAY_ROBOT_USERNAME", "")
-    reg_token = args.registry_token or os.environ.get("QUAY_ROBOT_TOKEN", "")
+    reg_user = args.registry_user or os.environ.get("REGISTRY_USER", "")
+    reg_token = args.registry_token or os.environ.get("REGISTRY_TOKEN", "")
     if not reg_user and not reg_token and docker_server == "ghcr.io":
         github_token = os.environ.get("GITHUB_TOKEN", "")
         if github_token:
@@ -279,19 +311,34 @@ def collect_config(args: argparse.Namespace) -> tuple[SetupConfig, Path, str]:
         reg_user = prompt("registry_user",
             "Registry username (or press Enter to use container login)", default="")
     if registry and reg_user and not reg_token:
-        reg_token = prompt_secret("Registry token", env_var="QUAY_ROBOT_TOKEN")
+        reg_token = prompt_secret("Registry token", env_var="REGISTRY_TOKEN")
 
     # Auto-detect container runtime (not prompted)
     container_rt = _detect_container_runtime()
 
+    # Orchestrator image — only required for --remote
+    _orch_default = (
+        defaults.get("orchestrator_image", "")
+        or "ghcr.io/inference-sim/sim2real/orchestrator:latest"
+    )
+    orchestrator_image = args.orchestrator_image or prompt(
+        "orchestrator_image",
+        "Orchestrator image for --remote mode (press Enter to accept default)",
+        default=_orch_default,
+        env_var="ORCHESTRATOR_IMAGE",
+    )
+
     cfg = SetupConfig(
-        namespace=namespace, registry=registry, repo_name=repo_name,
-        run_name=run_name, hf_token=hf_token,
+        namespace=namespace, namespaces=namespaces, registry=registry, repo_name=repo_name,
+        run_name=run_name, hf_token=hf_token, github_token=gh_token,
         registry_user=reg_user, registry_token=reg_token,
         storage_class=storage_class, is_openshift=is_openshift,
         no_cluster=args.no_cluster,
+        pipeline_yaml=args.pipeline_yaml,
+        orchestrator_image=orchestrator_image,
     )
-    ok(f"Configuration complete (namespace={namespace}, registry={registry or '(none)'})")
+    ns_display = ",".join(namespaces) if len(namespaces) > 1 else namespace
+    ok(f"Configuration complete (namespace={ns_display}, registry={registry or '(none)'})")
     return cfg, run_dir, container_rt
 
 # ── Step 2: Namespace ────────────────────────────────────────────────
@@ -331,16 +378,21 @@ def step_rbac(cfg: SetupConfig) -> None:
     if cfg.no_cluster:
         ok("RBAC (skipped — --no-cluster)"); return
 
-    roles_yaml = TEKTONC_DIR / "tekton" / "roles.yaml"
-    if not roles_yaml.exists():
-        err(f"roles.yaml not found at {roles_yaml} — did submodule init fail?"); sys.exit(1)
-
-    env = {**os.environ, "NAMESPACE": cfg.namespace}
-    subst = subprocess.run(
-        ["envsubst", "$NAMESPACE"],
-        input=roles_yaml.read_text(), capture_output=True, text=True, env=env, check=True,
-    )
-    run(["kubectl", "apply", "-f", "-"], input=subst.stdout)
+    primary_ns = cfg.namespaces[0]
+    env = {**os.environ, "NAMESPACE": cfg.namespace, "PRIMARY_NAMESPACE": primary_ns}
+    for yaml_path in [
+        TEKTONC_DIR / "tekton" / "roles.yaml",
+        TEKTONC_DIR / "tekton" / "rbac" / "sim2real-runner.yaml",
+        REPO_ROOT / "pipeline" / "rbac" / "sim2real-runner-cluster.yaml",
+        REPO_ROOT / "pipeline" / "rbac" / "sim2real-runner-ns.yaml",
+    ]:
+        if not yaml_path.exists():
+            err(f"{yaml_path.name} not found at {yaml_path} — did submodule init fail?"); sys.exit(1)
+        subst = subprocess.run(
+            ["envsubst", "$NAMESPACE $PRIMARY_NAMESPACE"],
+            input=yaml_path.read_text(), capture_output=True, text=True, env=env, check=True,
+        )
+        run(["kubectl", "apply", "-f", "-"], input=subst.stdout)
 
     if cfg.is_openshift:
         warn("OpenShift: adding SCC policies")
@@ -361,21 +413,40 @@ def step_secrets(cfg: SetupConfig, container_rt: str) -> None:
     if cfg.no_cluster:
         ok("Secrets (skipped — --no-cluster)"); return
 
-    # hf-secret — skip if token is empty and secret already exists (reuse mode)
-    if not cfg.hf_token and secret_exists("hf-secret", cfg.namespace):
-        ok("hf-secret already exists (reusing)")
+    hf_secret_name = _DEFAULT_HF_SECRET_NAME
+
+    if not cfg.hf_token and secret_exists(hf_secret_name, cfg.namespace):
+        ok(f"{hf_secret_name} already exists (reusing)")
     elif not cfg.hf_token:
-        err("HF_TOKEN is required and hf-secret does not exist in namespace"); sys.exit(1)
+        err(f"HF_TOKEN is required and {hf_secret_name} does not exist in namespace"); sys.exit(1)
     else:
         yaml_out = run(
-            ["kubectl", "create", "secret", "generic", "hf-secret",
+            ["kubectl", "create", "secret", "generic", hf_secret_name,
              f"--namespace={cfg.namespace}",
              f"--from-literal=HF_TOKEN={cfg.hf_token}",
              "--dry-run=client", "-o", "yaml"],
             capture=True,
         ).stdout
         run(["kubectl", "apply", "-f", "-"], input=yaml_out)
-        ok("hf-secret created/updated")
+        ok(f"{hf_secret_name} created/updated")
+
+    # github-token — used by install-llmdbenchmark to clone private repos
+    github_token = cfg.github_token
+    if not github_token and secret_exists("github-token", cfg.namespace):
+        ok("github-token already exists (reusing)")
+    elif not github_token:
+        warn("GITHUB_TOKEN not set and github-token secret does not exist — "
+             "install-llmdbenchmark will fail if repo requires auth")
+    else:
+        yaml_out = run(
+            ["kubectl", "create", "secret", "generic", "github-token",
+             f"--namespace={cfg.namespace}",
+             f"--from-literal=token={github_token}",
+             "--dry-run=client", "-o", "yaml"],
+            capture=True,
+        ).stdout
+        run(["kubectl", "apply", "-f", "-"], input=yaml_out)
+        ok("github-token created/updated")
 
     # registry-secret
     if not cfg.registry:
@@ -514,9 +585,9 @@ def step_test_push(cfg: SetupConfig, container_rt: str, test_push_tag: str,
 # ── Step 6: PVCs ─────────────────────────────────────────────────────
 
 def step_pvcs(cfg: SetupConfig) -> None:
-    """Step 6: Create PVCs for model, data, and source."""
+    """Step 6: Create PVCs for data and source."""
     step(6, 8, "PVCs")
-    pvcs = [("model-pvc", "300Gi"), ("data-pvc", "50Gi"), ("source-pvc", "50Gi")]
+    pvcs = [("data-pvc", "50Gi"), ("source-pvc", "50Gi")]
     sc_line = f"  storageClassName: {cfg.storage_class}" if cfg.storage_class else ""
 
     for name, size in pvcs:
@@ -551,7 +622,7 @@ def step_pvcs(cfg: SetupConfig) -> None:
 # ── Step 7: Tekton ───────────────────────────────────────────────────
 
 def step_tekton(cfg: SetupConfig) -> None:
-    """Step 7: Verify Tekton operator and deploy steps/tasks."""
+    """Step 7: Verify Tekton operator and deploy steps/tasks + Pipeline."""
     step(7, 8, "Tekton")
     if cfg.no_cluster:
         ok("Tekton (skipped — --no-cluster)"); return
@@ -574,13 +645,29 @@ def step_tekton(cfg: SetupConfig) -> None:
             run(["kubectl", "apply", "-f", str(yaml_file), f"-n={cfg.namespace}"])
     ok("Tekton steps and tasks deployed")
 
+    # Deploy Pipeline YAML
+    pipeline_path = Path(cfg.pipeline_yaml) if cfg.pipeline_yaml else REPO_ROOT / "pipeline" / "pipeline.yaml"
+    if not pipeline_path.exists():
+        if cfg.pipeline_yaml:
+            warn(f"Custom pipeline YAML not found at {pipeline_path} — skipping")
+        else:
+            err(f"Pipeline YAML not found at {pipeline_path}")
+            sys.exit(1)
+    else:
+        r = run(["kubectl", "apply", "-f", str(pipeline_path), f"-n={cfg.namespace}"],
+                check=False, capture=True)
+        if r.returncode == 0:
+            ok(f"Pipeline applied from {pipeline_path}")
+        else:
+            warn(f"Failed to apply Pipeline to {cfg.namespace}: {r.stderr.strip()}")
+
 # ── Step 8: Config Output ────────────────────────────────────────────
 
 def step_config_output(cfg: SetupConfig, run_dir: Path, container_rt: str) -> None:
-    """Step 8: Write setup_config.json, run_metadata.json, update env_defaults."""
+    """Step 8: Write setup_config.json and run_metadata.json."""
     step(8, 8, "Config")
 
-    workspace = REPO_ROOT / "workspace"
+    workspace = EXPERIMENT_ROOT / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
 
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -592,19 +679,22 @@ def step_config_output(cfg: SetupConfig, run_dir: Path, container_rt: str) -> No
     # setup_config.json
     setup_config = {
         "namespace": cfg.namespace,
+        "namespaces": cfg.namespaces,
         "registry": cfg.registry,
         "repo_name": cfg.repo_name,
         "storage_class": cfg.storage_class,
         "is_openshift": cfg.is_openshift,
         "tektonc_dir": str(TEKTONC_DIR),
         "sim2real_root": str(REPO_ROOT),
+        "pipeline_yaml": cfg.pipeline_yaml,
+        "orchestrator_image": cfg.orchestrator_image,
         "container_runtime": container_rt,
         "current_run": cfg.run_name,
         "setup_timestamp": now_iso,
+        "hf_secret_name": _DEFAULT_HF_SECRET_NAME,
         "workspaces": {
-            "model-cache":    {"persistentVolumeClaim": {"claimName": "model-pvc"}},
             "data-storage":   {"persistentVolumeClaim": {"claimName": "data-pvc"}},
-            "hf-credentials": {"secret": {"secretName": "hf-secret"}},
+            "source":         {"persistentVolumeClaim": {"claimName": "source-pvc"}},
         },
     }
     setup_path = workspace / "setup_config.json"
@@ -622,7 +712,7 @@ def step_config_output(cfg: SetupConfig, run_dir: Path, container_rt: str) -> No
         "container_runtime": container_rt,
         "created_at": now_iso,
         "pipeline_commit": commit,
-        **({"epp_image": f"{cfg.registry}/{cfg.repo_name}:{cfg.run_name}"} if cfg.registry else {}),
+        **({"component_image": f"{cfg.registry}/{cfg.repo_name}:{cfg.run_name}"} if cfg.registry else {}),
         "stages": {
             "setup":   {"status": "completed", "completed_at": now_iso,
                         "summary": f"Namespace {cfg.namespace} configured, "
@@ -636,51 +726,14 @@ def step_config_output(cfg: SetupConfig, run_dir: Path, container_rt: str) -> No
     meta_path.write_text(json.dumps(metadata, indent=2))
     ok(f"Run metadata → {meta_path}")
 
-    # Update env_defaults.yaml
-    _update_env_defaults(cfg.registry, cfg.repo_name, cfg.run_name)
-
-
-def _update_env_defaults(registry: str, repo_name: str, run_name: str) -> None:
-    """Update config/env_defaults.yaml with registry build values."""
-    cfg_path = REPO_ROOT / "config" / "env_defaults.yaml"
-    if not cfg_path.exists():
-        warn("config/env_defaults.yaml not found — skipping"); return
-    if not registry:
-        warn("No registry — config/env_defaults.yaml not updated. "
-             "Update common.stack.gaie.epp_image.build.hub manually."); return
-
-    try:
-        import yaml
-    except ImportError:
-        warn("PyYAML not available — skipping config update. Run: pip install PyYAML"); return
-
-    try:
-        with cfg_path.open() as f:
-            data = yaml.safe_load(f)
-
-        build = (data.setdefault("common", {})
-                     .setdefault("stack", {})
-                     .setdefault("gaie", {})
-                     .setdefault("epp_image", {})
-                     .setdefault("build", {}))
-        build["hub"]  = registry
-        build["name"] = repo_name
-        build["tag"]  = run_name
-
-        with cfg_path.open("w") as f:
-            yaml.dump(data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
-
-        ok("config/env_defaults.yaml updated with registry info")
-        warn("Note: PyYAML reformatted the file — inline comments were removed. "
-             "Review the diff before committing.")
-    except PermissionError:
-        warn("config/env_defaults.yaml is read-only — skipping update. "
-             "Manually set common.stack.gaie.epp_image.build.hub to: " + registry)
 
 # ── main ─────────────────────────────────────────────────────────────
 
 def main() -> int:
     args = build_parser().parse_args()
+
+    global EXPERIMENT_ROOT
+    EXPERIMENT_ROOT = Path(args.experiment_root).resolve() if getattr(args, "experiment_root", None) else Path.cwd()
 
     # --redeploy-tasks shortcut
     if args.redeploy_tasks:
@@ -695,31 +748,66 @@ def main() -> int:
             for yaml_file in sorted(tekton_dir.glob("*.yaml")):
                 run(["kubectl", "apply", "-f", str(yaml_file), f"-n={args.namespace}"])
         ok("Tekton steps and tasks redeployed")
+        # Also redeploy Pipeline YAML
+        pipeline_path = Path(args.pipeline_yaml) if args.pipeline_yaml else REPO_ROOT / "pipeline" / "pipeline.yaml"
+        if not pipeline_path.exists():
+            if args.pipeline_yaml:
+                warn(f"Custom pipeline YAML not found at {pipeline_path} — skipping")
+            else:
+                err(f"Pipeline YAML not found at {pipeline_path}")
+                return 1
+        else:
+            r = run(["kubectl", "apply", "-f", str(pipeline_path), f"-n={args.namespace}"],
+                    check=False, capture=True)
+            if r.returncode == 0:
+                ok(f"Pipeline redeployed from {pipeline_path}")
+            else:
+                err(f"Failed to apply Pipeline: {r.stderr.strip()}")
+                return 1
         return 0
 
     # 8-step flow
     cfg, run_dir, container_rt = collect_config(args)
 
-    step_namespace(cfg)
-    step_rbac(cfg)
-    step_secrets(cfg, container_rt)
     step_test_push(cfg, container_rt, args.test_push_tag, args.test_push)
-    step_pvcs(cfg)
-    step_tekton(cfg)
+    for ns in cfg.namespaces:
+        ns_cfg = SetupConfig(
+            namespace=ns,
+            namespaces=cfg.namespaces,
+            registry=cfg.registry,
+            repo_name=cfg.repo_name,
+            run_name=cfg.run_name,
+            hf_token=cfg.hf_token,
+            github_token=cfg.github_token,
+            registry_user=cfg.registry_user,
+            registry_token=cfg.registry_token,
+            storage_class=cfg.storage_class,
+            is_openshift=cfg.is_openshift,
+            no_cluster=cfg.no_cluster,
+            pipeline_yaml=cfg.pipeline_yaml,
+            orchestrator_image=cfg.orchestrator_image,
+        )
+        if len(cfg.namespaces) > 1:
+            print(_c("36", f"\n  ── Provisioning namespace: {ns} ──"))
+        step_namespace(ns_cfg)
+        step_rbac(ns_cfg)
+        step_secrets(ns_cfg, container_rt)
+        step_pvcs(ns_cfg)
+        step_tekton(ns_cfg)
     step_config_output(cfg, run_dir, container_rt)
 
     # Completion
     print()
     print(_c("32", "━━━ Setup complete ━━━"))
     print()
-    cfg_path = REPO_ROOT / "workspace" / "setup_config.json"
+    cfg_path = EXPERIMENT_ROOT / "workspace" / "setup_config.json"
     print(f"Setup config:  {cfg_path}")
     print(f"Run name:      {cfg.run_name}")
     print(f"Run directory: {run_dir}")
     print()
     print("Next steps:")
-    print("  1. Edit config/transfer.yaml (algorithm source, workloads, context hints)")
-    print("  2. Run: python pipeline/prepare.py")
+    print("  1. Edit <experiment-root>/transfer.yaml (algorithm source, workloads, context)")
+    print("  2. Run: python <repo-root>/pipeline/prepare.py")
     return 0
 
 if __name__ == "__main__":

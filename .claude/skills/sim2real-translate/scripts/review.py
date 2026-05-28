@@ -91,7 +91,7 @@ def build_user_message(
     context_doc: str,
     treatment_config: str,
     round_num: int,
-    hints_json: "str | None" = None,
+    context_json: "str | None" = None,
 ) -> str:
     base = (
         f"## Review Round {round_num}\n\n"
@@ -104,20 +104,14 @@ def build_user_message(
         f"## Translation Context\n{context_doc}\n\n"
         f"## Treatment Config\n```yaml\n{treatment_config}\n```\n"
     )
-    if hints_json:
+    if context_json:
         try:
-            hints = json.loads(hints_json)
-            hints_text = hints.get("text", "")
-            hints_files = hints.get("files", [])
-            if hints_text or hints_files:
-                parts = ["\n## Transfer Hints (user's mandate for this run)\n"]
-                if hints_text:
-                    parts.append(hints_text)
-                for f in hints_files:
-                    parts.append(f"\n### {f.get('path', 'hint')}\n{f.get('content', '')}")
-                base = base + "\n".join(parts)
+            ctx = json.loads(context_json)
+            ctx_text = ctx.get("text", "")
+            if ctx_text:
+                base += f"\n## Transfer Context (operator's mandate for this run)\n{ctx_text}\n"
         except (json.JSONDecodeError, AttributeError):
-            pass  # hints are optional; don't fail review if malformed
+            pass
     return base
 
 
@@ -300,7 +294,7 @@ def run_review_round(
     models: list,
     api_key: str,
     base_url: str,
-    hints_json: "str | None" = None,
+    context_json: "str | None" = None,
 ) -> list:
     """Run one review round across all models in parallel."""
     plugin_parts = []
@@ -318,7 +312,7 @@ def run_review_round(
             Path(context).read_text(),
             Path(treatment_config).read_text(),
             round_num,
-            hints_json=hints_json,
+            context_json=context_json,
         )},
     ]
 
@@ -373,9 +367,9 @@ def main():
         "--dev", action="store_true", help="Dev mode: only aws/claude-opus-4-6"
     )
     parser.add_argument(
-        "--hints-json", dest="hints_json", default=None,
-        help="Optional JSON string with hints {text, files:[{path, content}]}. "
-             "Used to evaluate whether translation honored the user's mandate."
+        "--context-json", dest="context_json", default=None,
+        help="Optional JSON string with context {text}. "
+             "Used to evaluate whether translation honored the operator's instructions."
     )
     args = parser.parse_args()
 
@@ -409,7 +403,7 @@ def main():
         models,
         api_key,
         base_url,
-        hints_json=getattr(args, "hints_json", None),
+        context_json=args.context_json,
     )
     has_consensus, approve_count, total_successful = check_consensus(reviews)
 

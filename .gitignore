@@ -2,14 +2,9 @@
 .worktrees/
 
 # Project-specific
-docs/plans/scratch/
 tmp/
 actions-runner/
-# temporary
 .claude/worktrees/
-.claude/convergence-state/
-.claude/skills/convergence-review/
-*-review.md
 
 # OS files
 .DS_Store

@@ -1,9 +1,11 @@
 [submodule "inference-sim"]
 	path = inference-sim
 	url = https://github.com/inference-sim/inference-sim.git
-[submodule "llm-d-inference-scheduler"]
-	path = llm-d-inference-scheduler
-	url = https://github.com/llm-d/llm-d-inference-scheduler.git
 [submodule "tektonc-data-collection"]
 	path = tektonc-data-collection
 	url = https://github.com/inference-sim/tektonc-data-collection.git
+	branch = main
+[submodule "llm-d-benchmark"]
+	path = llm-d-benchmark
+	url = https://github.com/llm-d/llm-d-benchmark.git
+	branch = main

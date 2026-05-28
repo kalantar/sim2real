@@ -1,7 +1,6 @@
 """Tests for prepare.py — Phase 1 (Init), Phase 3 (Translation Checkpoint), validate-assembly."""
 import json
 import pytest
-import warnings
 import yaml
 
 from pipeline.lib.state_machine import StateMachine
@@ -12,36 +11,24 @@ MINIMAL_MANIFEST = {
     "kind": "sim2real-transfer",
     "version": 3,
     "scenario": "routing",
-    "algorithm": {
+    "baselines": [{
+        "name": "baseline",
+        "scenario": None,
+        "sim": {"config": "sim2real_golden/routers/policy_baseline_211.yaml"},
+    }],
+    "algorithms": [{
+        "name": "treatment",
         "source": "sim2real_golden/routers/router_adaptive_v2.go",
         "config": "sim2real_golden/routers/policy_adaptive_v2.yaml",
-    },
-    "baseline": {
-        "sim": {"config": "sim2real_golden/routers/policy_baseline_211.yaml"},
-        "real": {"config": None, "notes": ""},
-    },
+        "scenario": None,
+        "defaults": "baseline",
+    }],
     "workloads": ["sim2real_golden/workloads/wl1.yaml"],
-}
-
-MINIMAL_ENV_DEFAULTS = {
-    "common": {
-        "observe": {"request_multiplier": 10},
-        "build": {
-            "commands": [["go", "build", "./..."]],
-        },
-    },
-    "scenarios": {
-        "routing": {
-            "target": {
-                "repo": "llm-d-inference-scheduler",
-            },
-            "build": {},
-            "config": {
-                "kind": "EndpointPickerConfig",
-                "helm_path": "gaie.treatment.helmValues.inferenceExtension.pluginsCustomConfig.custom-plugins.yaml",
-            },
-            "gaie": {"baseline": {"helmValues": {}}},
-        },
+    "component": {
+        "repo": "github.com/llm-d/llm-d-inference-scheduler",
+        "path": "llm-d-inference-scheduler",
+        "kind": "EndpointPickerConfig",
+        "build": {"commands": [["go", "build", "./..."]]},
     },
 }
 
@@ -56,11 +43,21 @@ def _write_text(path, text=""):
     path.write_text(text)
 
 
+import subprocess as _subprocess
+
+
+def _init_git_repo(path):
+    """Initialize a real git repo with an initial empty commit at path."""
+    _subprocess.run(["git", "init"], cwd=path, capture_output=True)
+    _subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=path, capture_output=True)
+    _subprocess.run(["git", "config", "user.name", "T"], cwd=path, capture_output=True)
+    _subprocess.run(["git", "commit", "--allow-empty", "-m", "init"], cwd=path, capture_output=True)
+
+
 @pytest.fixture
 def repo(tmp_path):
     """Set up a minimal repo layout for prepare.py testing."""
     # Config files
-    _write_yaml(tmp_path / "config" / "env_defaults.yaml", MINIMAL_ENV_DEFAULTS)
     manifest_data = dict(MINIMAL_MANIFEST)
     _write_yaml(tmp_path / "config" / "transfer.yaml", manifest_data)
 
@@ -76,10 +73,10 @@ def repo(tmp_path):
     _write_text(tmp_path / "llm-d-inference-scheduler" / "pkg" / "plugins" / "register.go",
                 'func init() {\n\tRegister("test-scorer", NewTestScorer)\n}')
 
-    # inference-sim submodule stub (for git describe --tags in _generate_algorithm_values)
+    # inference-sim submodule: real git repo so git rev-parse HEAD succeeds
     inf_sim = tmp_path / "inference-sim"
     inf_sim.mkdir()
-    _write_text(inf_sim / ".git" / "config", "[core]\nrepositoryformatversion = 0\n")
+    _init_git_repo(inf_sim)
 
     return tmp_path
 
@@ -95,6 +92,7 @@ def _import_prepare_with_root(repo_root):
     import pipeline.prepare as mod
     importlib.reload(mod)
     mod.REPO_ROOT = repo_root
+    mod.EXPERIMENT_ROOT = repo_root
     return mod
 
 
@@ -159,10 +157,12 @@ class TestPhaseInit:
     def test_init_missing_algorithm_source_exits(self, repo):
         mod = _import_prepare_with_root(repo)
         manifest = dict(MINIMAL_MANIFEST)
-        manifest["algorithm"] = {
+        manifest["algorithms"] = [{
+            "name": "treatment",
             "source": "nonexistent/file.go",
             "config": "sim2real_golden/routers/policy_adaptive_v2.yaml",
-        }
+            "defaults": "baseline",
+        }]
         run_dir = repo / "workspace" / "runs" / "test-run"
 
         class Args:
@@ -189,7 +189,8 @@ class TestPhaseInit:
         with pytest.raises(SystemExit):
             mod._phase_init(Args(), manifest, run_dir)
 
-    def test_init_unknown_scenario_exits(self, repo):
+    def test_init_unknown_scenario_succeeds(self, repo):
+        """Unknown scenario no longer requires matching env_defaults entry."""
         mod = _import_prepare_with_root(repo)
         manifest = dict(MINIMAL_MANIFEST)
         manifest["scenario"] = "unknown_scenario"
@@ -201,8 +202,117 @@ class TestPhaseInit:
             manifest = None
             rebuild_context = False
 
+        state = mod._phase_init(Args(), manifest, run_dir)
+        assert state is not None
+
+    def test_init_ref_match_succeeds(self, repo):
+        """Phase 1 passes when component.ref matches checked-out SHA."""
+        comp = repo / "llm-d-inference-scheduler"
+        _init_git_repo(comp)
+        import subprocess
+        sha = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
+                            text=True, cwd=comp).stdout.strip()
+
+        mod = _import_prepare_with_root(repo)
+        manifest = dict(MINIMAL_MANIFEST)
+        manifest["component"] = {**manifest["component"], "ref": sha}
+        run_dir = repo / "workspace" / "runs" / "test-run"
+
+        class Args:
+            force = True
+            run = "test-run"
+            manifest = None
+            rebuild_context = False
+
+        state = mod._phase_init(Args(), manifest, run_dir)
+        assert state.is_done("init")
+
+    def test_init_ref_mismatch_warns(self, repo, capsys):
+        """Phase 1 warns (does not exit) when component.ref doesn't match checked-out SHA."""
+        comp = repo / "llm-d-inference-scheduler"
+        _init_git_repo(comp)
+
+        mod = _import_prepare_with_root(repo)
+        manifest = dict(MINIMAL_MANIFEST)
+        manifest["component"] = {**manifest["component"], "ref": "deadbeef" * 5}
+        run_dir = repo / "workspace" / "runs" / "test-run"
+
+        class Args:
+            force = True
+            run = "test-run"
+            manifest = None
+            rebuild_context = False
+
+        state = mod._phase_init(Args(), manifest, run_dir)
+        assert state.is_done("init")
+        captured = capsys.readouterr()
+        assert "Component ref mismatch" in captured.out
+        assert "deadbeef" * 5 in captured.out
+        assert "git checkout" in captured.out
+
+    def test_init_ref_missing_submodule_exits_with_command(self, repo, capsys):
+        """Phase 1 errors with init command when submodule missing and ref set."""
+        import shutil
+        comp = repo / "llm-d-inference-scheduler"
+        if comp.exists():
+            shutil.rmtree(comp)
+
+        mod = _import_prepare_with_root(repo)
+        manifest = dict(MINIMAL_MANIFEST)
+        manifest["component"] = {**manifest["component"], "ref": "a" * 40}
+        run_dir = repo / "workspace" / "runs" / "test-run"
+
+        class Args:
+            force = True
+            run = "test-run"
+            manifest = None
+            rebuild_context = False
+
         with pytest.raises(SystemExit):
             mod._phase_init(Args(), manifest, run_dir)
+        captured = capsys.readouterr()
+        assert "git submodule update --init" in captured.err or "git submodule update --init" in captured.out
+
+    def test_init_ref_not_git_repo_exits(self, repo, capsys):
+        """Phase 1 errors when component.ref is set but directory is not a git repo."""
+        import shutil
+        comp = repo / "llm-d-inference-scheduler"
+        if comp.exists():
+            shutil.rmtree(comp)
+        comp.mkdir()
+        (comp / "somefile.txt").write_text("not a git repo")
+
+        mod = _import_prepare_with_root(repo)
+        manifest = dict(MINIMAL_MANIFEST)
+        manifest["component"] = {**manifest["component"], "ref": "a" * 40}
+        run_dir = repo / "workspace" / "runs" / "test-run"
+
+        class Args:
+            force = True
+            run = "test-run"
+            manifest = None
+            rebuild_context = False
+
+        with pytest.raises(SystemExit):
+            mod._phase_init(Args(), manifest, run_dir)
+        captured = capsys.readouterr()
+        assert "not a git repository" in captured.err
+
+    def test_init_no_ref_skips_validation(self, repo):
+        """Phase 1 does not check ref when component.ref is absent."""
+        mod = _import_prepare_with_root(repo)
+        manifest = dict(MINIMAL_MANIFEST)
+        # No ref field — should pass without error
+        run_dir = repo / "workspace" / "runs" / "test-run"
+
+        class Args:
+            force = True
+            run = "test-run"
+            manifest = None
+            rebuild_context = False
+
+        state = mod._phase_init(Args(), manifest, run_dir)
+        assert state.is_done("init")
 
 
 # ── Phase 3: Translation Checkpoint ────────────────────────────────────────
@@ -240,7 +350,7 @@ class TestPhaseTranslate:
         assert si["config_kind"] == "EndpointPickerConfig"
         assert isinstance(si["build_commands"], list)
         # Test should not append, skill determines test scope
-        assert si["build_commands"] == [["go", "build", "./..."]]
+        assert si["build_commands"] == ["go build ./..."]
 
     def test_skips_when_done(self, repo):
         mod = _import_prepare_with_root(repo)
@@ -284,7 +394,6 @@ class TestPhaseTranslate:
             "package": "scorer",
             "test_commands": [["go", "test", "./..."]],
             "config_kind": "EndpointPickerConfig",
-            "helm_path": "gaie.treatment.helmValues.config",
             "treatment_config_generated": True,
             "description": "Adaptive v2 scorer",
             "register_file": "pkg/plugins/register.go",
@@ -354,11 +463,10 @@ class TestPhaseTranslate:
             mod._phase_translate(Args(), state, manifest, run_dir, resolved, context_path)
         assert state.get_phase("translate").get("checkpoint_hits") == 2
 
-    def test_skill_input_contains_hints_empty(self, repo):
-        """When manifest has no hints, skill_input.json has hints={text:'', files:[]}."""
+    def test_skill_input_contains_context_empty(self, repo):
+        """When manifest has no context.text, skill_input.json has context={text:''}."""
         mod = _import_prepare_with_root(repo)
         manifest = dict(MINIMAL_MANIFEST)
-        # no 'hints' key in manifest
         run_dir = repo / "workspace" / "runs" / "test-run"
         run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -377,24 +485,17 @@ class TestPhaseTranslate:
             mod._phase_translate(Args(), state, manifest, run_dir, resolved, context_path)
 
         si = json.loads((run_dir / "skill_input.json").read_text())
-        assert "hints" in si
-        assert si["hints"]["text"] == ""
-        assert si["hints"]["files"] == []
+        assert "context" in si
+        assert si["context"]["text"] == ""
+        assert "hints" not in si
         # target has only repo
         assert set(si["target"].keys()) == {"repo"}
-        # old fields removed
-        assert "context_notes" not in si
-        assert "plugin_dir" not in si.get("target", {})
-        assert "register_file" not in si.get("target", {})
 
-    def test_skill_input_contains_hints_from_manifest(self, repo):
-        """When manifest has hints, they are written to skill_input.json."""
+    def test_skill_input_contains_context_text_from_manifest(self, repo):
+        """When manifest has context.text, it is written to skill_input.json."""
         mod = _import_prepare_with_root(repo)
         manifest = dict(MINIMAL_MANIFEST)
-        manifest["hints"] = {
-            "text": "Modify scorer X",
-            "files": [{"path": "hint.md", "content": "# Hint content"}],
-        }
+        manifest["context"] = {"text": "Modify scorer X", "files": []}
         run_dir = repo / "workspace" / "runs" / "test-run2"
         run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -413,8 +514,8 @@ class TestPhaseTranslate:
             mod._phase_translate(Args(), state, manifest, run_dir, resolved, context_path)
 
         si = json.loads((run_dir / "skill_input.json").read_text())
-        assert si["hints"]["text"] == "Modify scorer X"
-        assert si["hints"]["files"][0]["content"] == "# Hint content"
+        assert si["context"]["text"] == "Modify scorer X"
+        assert "hints" not in si
 
     def test_translation_output_validates_all_required_fields(self, repo):
         """translation_output.json must have all required fields."""
@@ -437,7 +538,6 @@ class TestPhaseTranslate:
             "files_modified": [],
             "package": "scorer",
             "config_kind": "EndpointPickerConfig",
-            "helm_path": "some.path",
             "treatment_config_generated": True,
             "description": "A test scorer",
             "register_file": None,
@@ -474,7 +574,6 @@ class TestPhaseTranslate:
             "package": "scorer",
             "test_commands": [["go", "test", "./..."]],
             "config_kind": "EndpointPickerConfig",
-            "helm_path": "some.path",
             "treatment_config_generated": True,
             "description": "A test scorer",
             # missing register_file
@@ -510,7 +609,6 @@ class TestPhaseTranslate:
             "package": "scorer",
             "test_commands": [["go", "test", "./..."]],
             "config_kind": "EndpointPickerConfig",
-            "helm_path": "some.path",
             "treatment_config_generated": True,
             "description": "A test scorer",
             "register_file": "pkg/plugins/register.go",
@@ -549,11 +647,10 @@ class TestPhaseTranslate:
             mod._phase_translate(Args(), state, manifest, run_dir, resolved, context_path)
 
         si = json.loads((run_dir / "skill_input.json").read_text())
-        # Should only have the build commands from config, not test appended
+        # Should only have the build commands from manifest, not test appended
         build_cmds = si["build_commands"]
-        # From MINIMAL_ENV_DEFAULTS, common.build.commands has [["go", "build", "./..."]]
         assert len(build_cmds) == 1
-        assert build_cmds[0] == ["go", "build", "./..."]
+        assert build_cmds[0] == "go build ./..."
         # Should NOT have go test appended
         assert not any("test" in str(cmd) for cmd in build_cmds)
 
@@ -591,18 +688,26 @@ class TestPhaseTranslate:
             "kind": "sim2real-transfer",
             "version": 3,
             "scenario": "routing",
-            "algorithm": {
-                "source": "sim2real_golden/routers/router_adaptive_v2.go",
-                "config": "sim2real_golden/routers/policy_adaptive_v2.yaml",
-            },
-            "baseline": {
+            "baselines": [{
+                "name": "baseline",
+                "scenario": None,
                 "sim": {"config": "sim2real_golden/routers/policy_baseline_211.yaml"},
                 "real": {
                     "config": "sim2real_golden/routers/baseline_epp_template.yaml",
                     "notes": "Use EndpointPickerConfig",
                 },
-            },
+            }],
+            "algorithms": [{
+                "name": "treatment",
+                "source": "sim2real_golden/routers/router_adaptive_v2.go",
+                "defaults": "baseline",
+            }],
             "workloads": ["sim2real_golden/workloads/wl1.yaml"],
+            "component": {
+                "repo": "github.com/llm-d/llm-d-inference-scheduler",
+                "path": "llm-d-inference-scheduler",
+                "kind": "EndpointPickerConfig",
+            },
         }
         _write_yaml(repo / "config" / "transfer.yaml", v3_data)
         # Create the real config file so manifest validation passes
@@ -641,7 +746,7 @@ class TestValidateAssembly:
         run_dir = repo / "workspace" / "runs" / "test-run"
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        resolved = MINIMAL_ENV_DEFAULTS["scenarios"]["routing"]
+        resolved = {"repo": "github.com/llm-d/llm-d-inference-scheduler", "path": "llm-d-inference-scheduler", "kind": "EndpointPickerConfig"}
 
         # Set up translation output
         output = {
@@ -657,10 +762,10 @@ class TestValidateAssembly:
         register_path = repo / "llm-d-inference-scheduler" / "pkg" / "plugins" / "register.go"
         register_path.write_text('Register("test-scorer", NewTestScorer)')
 
-        # Create treatment-pipeline.yaml with plugin type
-        pkg_dir = run_dir / "cluster" / "treatment"
-        pkg_dir.mkdir(parents=True)
-        (pkg_dir / "treatment-pipeline.yaml").write_text("- type: test-scorer\n")
+        # Create treatment.yaml with plugin type
+        cluster_dir = run_dir / "cluster"
+        cluster_dir.mkdir(parents=True, exist_ok=True)
+        (cluster_dir / "treatment.yaml").write_text("- type: test-scorer\n")
 
         # Create treatment_config with correct kind
         (run_dir / "generated").mkdir(parents=True, exist_ok=True)
@@ -678,7 +783,7 @@ class TestValidateAssembly:
         run_dir = repo / "workspace" / "runs" / "test-run"
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        resolved = MINIMAL_ENV_DEFAULTS["scenarios"]["routing"]
+        resolved = {"repo": "github.com/llm-d/llm-d-inference-scheduler", "path": "llm-d-inference-scheduler", "kind": "EndpointPickerConfig"}
 
         output = {
             "plugin_type": "missing-scorer",
@@ -693,21 +798,21 @@ class TestValidateAssembly:
         register_path = repo / "llm-d-inference-scheduler" / "pkg" / "plugins" / "register.go"
         register_path.write_text('Register("test-scorer", NewTestScorer)')
 
-        # Create treatment-pipeline.yaml with the plugin type so Check 2 passes
-        pkg_dir = run_dir / "cluster" / "treatment"
-        pkg_dir.mkdir(parents=True)
-        (pkg_dir / "treatment-pipeline.yaml").write_text("- type: missing-scorer\n")
+        # Create treatment.yaml with the plugin type so Check 2 passes
+        cluster_dir = run_dir / "cluster"
+        cluster_dir.mkdir(parents=True, exist_ok=True)
+        (cluster_dir / "treatment.yaml").write_text("- type: missing-scorer\n")
 
         with pytest.raises(SystemExit):
             mod._validate_assembly(run_dir, resolved)
 
     def test_fails_plugin_type_not_in_pipeline(self, repo):
-        """Check 2 now reads treatment-pipeline.yaml, not epp.yaml."""
+        """Check 2 reads cluster/treatment.yaml for plugin_type."""
         mod = _import_prepare_with_root(repo)
         run_dir = repo / "workspace" / "runs" / "test-run"
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        resolved = MINIMAL_ENV_DEFAULTS["scenarios"]["routing"]
+        resolved = {"repo": "github.com/llm-d/llm-d-inference-scheduler", "path": "llm-d-inference-scheduler", "kind": "EndpointPickerConfig"}
 
         output = {
             "plugin_type": "test-scorer",
@@ -722,42 +827,10 @@ class TestValidateAssembly:
         register_path = repo / "llm-d-inference-scheduler" / "pkg" / "plugins" / "register.go"
         register_path.write_text('Register("test-scorer", NewTestScorer)')
 
-        # treatment-pipeline.yaml does NOT contain the plugin type
-        pkg_dir = run_dir / "cluster" / "treatment"
-        pkg_dir.mkdir(parents=True)
-        (pkg_dir / "treatment-pipeline.yaml").write_text("- type: other-scorer\n")
-
-        with pytest.raises(SystemExit):
-            mod._validate_assembly(run_dir, resolved)
-
-    def test_fails_kind_mismatch(self, repo):
-        mod = _import_prepare_with_root(repo)
-        run_dir = repo / "workspace" / "runs" / "test-run"
-        run_dir.mkdir(parents=True, exist_ok=True)
-
-        resolved = MINIMAL_ENV_DEFAULTS["scenarios"]["routing"]
-
-        output = {
-            "plugin_type": "test-scorer",
-            "files_created": [],
-            "files_modified": [],
-            "register_file": "pkg/plugins/register.go",
-            "treatment_config_generated": True,
-        }
-        (run_dir / "translation_output.json").write_text(json.dumps(output))
-
-        # register.go contains the plugin type
-        register_path = repo / "llm-d-inference-scheduler" / "pkg" / "plugins" / "register.go"
-        register_path.write_text('Register("test-scorer", NewTestScorer)')
-
-        # treatment-pipeline.yaml contains the plugin type
-        pkg_dir = run_dir / "cluster" / "treatment"
-        pkg_dir.mkdir(parents=True)
-        (pkg_dir / "treatment-pipeline.yaml").write_text("- type: test-scorer\n")
-
-        # treatment_config has wrong kind
-        (run_dir / "generated").mkdir(parents=True, exist_ok=True)
-        _write_yaml(run_dir / "generated" / "treatment_config.yaml", {"kind": "WrongKind"})
+        # treatment.yaml does NOT contain the plugin type
+        cluster_dir = run_dir / "cluster"
+        cluster_dir.mkdir(parents=True, exist_ok=True)
+        (cluster_dir / "treatment.yaml").write_text("- type: other-scorer\n")
 
         with pytest.raises(SystemExit):
             mod._validate_assembly(run_dir, resolved)
@@ -767,7 +840,7 @@ class TestValidateAssembly:
         run_dir = repo / "workspace" / "runs" / "test-run"
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        resolved = MINIMAL_ENV_DEFAULTS["scenarios"]["routing"]
+        resolved = {"repo": "github.com/llm-d/llm-d-inference-scheduler", "path": "llm-d-inference-scheduler", "kind": "EndpointPickerConfig"}
 
         output = {
             "plugin_type": "test-scorer",
@@ -782,10 +855,10 @@ class TestValidateAssembly:
         register_path = repo / "llm-d-inference-scheduler" / "pkg" / "plugins" / "register.go"
         register_path.write_text('Register("test-scorer", NewTestScorer)')
 
-        # treatment-pipeline.yaml contains the plugin type
-        pkg_dir = run_dir / "cluster" / "treatment"
-        pkg_dir.mkdir(parents=True)
-        (pkg_dir / "treatment-pipeline.yaml").write_text("- type: test-scorer\n")
+        # treatment.yaml contains the plugin type
+        cluster_dir = run_dir / "cluster"
+        cluster_dir.mkdir(parents=True, exist_ok=True)
+        (cluster_dir / "treatment.yaml").write_text("- type: test-scorer\n")
 
         with pytest.raises(SystemExit):
             mod._validate_assembly(run_dir, resolved)
@@ -796,7 +869,7 @@ class TestValidateAssembly:
         run_dir = repo / "workspace" / "runs" / "test-run"
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        resolved = MINIMAL_ENV_DEFAULTS["scenarios"]["routing"]
+        resolved = {"repo": "github.com/llm-d/llm-d-inference-scheduler", "path": "llm-d-inference-scheduler", "kind": "EndpointPickerConfig"}
         output = {
             "plugin_type": "test-scorer",
             "files_created": [],
@@ -806,9 +879,9 @@ class TestValidateAssembly:
         }
         (run_dir / "translation_output.json").write_text(json.dumps(output))
 
-        pkg_dir = run_dir / "cluster" / "treatment"
-        pkg_dir.mkdir(parents=True)
-        (pkg_dir / "treatment-pipeline.yaml").write_text("type: test-scorer\n")
+        cluster_dir = run_dir / "cluster"
+        cluster_dir.mkdir(parents=True, exist_ok=True)
+        (cluster_dir / "treatment.yaml").write_text("type: test-scorer\n")
         (run_dir / "generated").mkdir(parents=True, exist_ok=True)
         _write_yaml(run_dir / "generated" / "treatment_config.yaml", {"kind": "EndpointPickerConfig"})
 
@@ -818,13 +891,13 @@ class TestValidateAssembly:
 
         mod._validate_assembly(run_dir, resolved)  # should not raise
 
-    def test_check2_uses_pipeline_yaml_not_epp(self, repo):
-        """Check 2 now reads treatment-pipeline.yaml, not epp.yaml."""
+    def test_check2_uses_treatment_yaml(self, repo):
+        """Check 2 reads cluster/treatment.yaml for plugin_type."""
         mod = _import_prepare_with_root(repo)
         run_dir = repo / "workspace" / "runs" / "test-run"
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        resolved = MINIMAL_ENV_DEFAULTS["scenarios"]["routing"]
+        resolved = {"repo": "github.com/llm-d/llm-d-inference-scheduler", "path": "llm-d-inference-scheduler", "kind": "EndpointPickerConfig"}
         output = {
             "plugin_type": "test-scorer",
             "files_created": [],
@@ -837,276 +910,482 @@ class TestValidateAssembly:
         register = repo / "llm-d-inference-scheduler" / "pkg" / "plugins" / "register.go"
         register.write_text('Register("test-scorer", NewTestScorer)')
 
-        pkg_dir = run_dir / "cluster" / "treatment"
-        pkg_dir.mkdir(parents=True)
-        (pkg_dir / "treatment-pipeline.yaml").write_text("type: test-scorer\n")
+        cluster_dir = run_dir / "cluster"
+        cluster_dir.mkdir(parents=True, exist_ok=True)
+        (cluster_dir / "treatment.yaml").write_text("type: test-scorer\n")
         (run_dir / "generated").mkdir(parents=True, exist_ok=True)
         _write_yaml(run_dir / "generated" / "treatment_config.yaml", {"kind": "EndpointPickerConfig"})
 
         mod._validate_assembly(run_dir, resolved)  # should not raise
 
-    def test_check3_skipped_when_not_generated(self, repo):
-        """treatment_config_generated=False — Check 3 (kind match) skipped."""
+
+
+# ── _get_submodule_shas ────────────────────────────────────────────────────
+
+class TestGetSubmoduleShas:
+    def test_returns_component_sha_from_manifest_path(self, repo):
+        """_get_submodule_shas uses component_path for the component entry."""
+        comp = repo / "my-scheduler"
+        comp.mkdir()
+        _init_git_repo(comp)
+
         mod = _import_prepare_with_root(repo)
-        run_dir = repo / "workspace" / "runs" / "test-run"
-        run_dir.mkdir(parents=True, exist_ok=True)
+        shas = mod._get_submodule_shas(component_path="my-scheduler")
+        assert shas.get("component") != "unknown"
+        assert len(shas["component"]) == 40  # SHA-1 hex
 
-        resolved = MINIMAL_ENV_DEFAULTS["scenarios"]["routing"]
-        output = {
-            "plugin_type": "test-scorer",
-            "files_created": [],
-            "files_modified": ["pkg/plugins/scorer/precise_prefix_cache.go"],
-            "register_file": "pkg/plugins/register.go",
-            "treatment_config_generated": False,
-        }
-        (run_dir / "translation_output.json").write_text(json.dumps(output))
+    def test_unknown_when_component_path_missing(self, repo):
+        """_get_submodule_shas returns 'unknown' when component dir doesn't exist."""
+        mod = _import_prepare_with_root(repo)
+        shas = mod._get_submodule_shas(component_path="nonexistent")
+        assert shas["component"] == "unknown"
 
-        register = repo / "llm-d-inference-scheduler" / "pkg" / "plugins" / "register.go"
-        register.write_text('Register("test-scorer", NewTestScorer)')
-
-        pkg_dir = run_dir / "cluster" / "treatment"
-        pkg_dir.mkdir(parents=True)
-        (pkg_dir / "treatment-pipeline.yaml").write_text("type: test-scorer\n")
-        # No treatment_config.yaml — but treatment_config_generated=False, so Check 3 is skipped
-
-        mod._validate_assembly(run_dir, resolved)  # should not raise
+    def test_framework_submodules_still_resolved(self, repo):
+        """inference-sim and llm-d-benchmark are still in the result."""
+        mod = _import_prepare_with_root(repo)
+        shas = mod._get_submodule_shas(component_path="llm-d-inference-scheduler")
+        assert "inference-sim" in shas
+        assert "llm-d-benchmark" in shas
 
 
 # ── Config resolution ───────────────────────────────────────────────────────
 
 class TestConfigResolution:
-    def test_deep_merge(self, repo):
-        mod = _import_prepare_with_root(repo)
-        base = {"a": 1, "nested": {"x": 1, "y": 2}}
-        overlay = {"b": 2, "nested": {"y": 3, "z": 4}}
-        result = mod._deep_merge(base, overlay)
-        assert result == {"a": 1, "b": 2, "nested": {"x": 1, "y": 3, "z": 4}}
-
-    def test_deep_merge_does_not_mutate(self, repo):
-        mod = _import_prepare_with_root(repo)
-        base = {"nested": {"x": 1}}
-        overlay = {"nested": {"x": 2}}
-        result = mod._deep_merge(base, overlay)
-        assert base["nested"]["x"] == 1
-        assert result["nested"]["x"] == 2
-
     def test_load_resolved_config(self, repo):
         mod = _import_prepare_with_root(repo)
         manifest = dict(MINIMAL_MANIFEST)
         resolved = mod._load_resolved_config(manifest)
-        # Should have merged common + routing scenario
-        assert resolved["observe"]["request_multiplier"] == 10
-        assert resolved["target"]["repo"] == "llm-d-inference-scheduler"
-        assert resolved["config"]["kind"] == "EndpointPickerConfig"
+        # Should return component section fields
+        assert resolved["path"] == "llm-d-inference-scheduler"
+        assert resolved["kind"] == "EndpointPickerConfig"
 
 
-# ── _generate_algorithm_values ──────────────────────────────────────────────
 
-class TestGenerateAlgorithmValues:
-    def test_embeds_treatment_config_when_generated(self, repo):
-        """treatment_config_generated=true → treatment slot gets custom EPP config."""
-        mod = _import_prepare_with_root(repo)
+
+class TestExperimentRootSeparation:
+    """Verify --experiment-root correctly separates experiment paths from framework paths."""
+
+    def _make_framework(self, tmp_path):
+        """Create a minimal framework directory (no experiment files)."""
+        fw = tmp_path / "sim2real"
+        # inference-sim stub
+        (fw / "inference-sim" / ".git").mkdir(parents=True)
+        _write_text(fw / "inference-sim" / ".git" / "config", "[core]\n")
+        # pipeline/pipeline.yaml (static Pipeline resource)
+        (fw / "pipeline").mkdir(parents=True, exist_ok=True)
+        _write_text(fw / "pipeline" / "pipeline.yaml", "apiVersion: tekton.dev/v1\nkind: Pipeline\nmetadata:\n  name: sim2real\n")
+        return fw
+
+    def _make_experiment(self, tmp_path):
+        """Create a minimal experiment repo (transfer.yaml at root)."""
+        exp = tmp_path / "admission-control"
+        manifest_data = {
+            "kind": "sim2real-transfer",
+            "version": 3,
+            "scenario": "admission_control",
+            "baselines": [{"name": "baseline", "scenario": None}],
+            "algorithms": [{"name": "treatment", "source": "algorithm/admission.go", "defaults": "baseline"}],
+            "workloads": ["workloads/w1.yaml"],
+            "component": {"repo": "github.com/llm-d/llm-d-inference-scheduler", "path": "llm-d-inference-scheduler", "kind": "AdmissionConfig"},
+        }
+        _write_yaml(exp / "transfer.yaml", manifest_data)
+        _write_text(exp / "algorithm" / "admission.go", "package main\n")
+        _write_text(exp / "workloads" / "w1.yaml",
+                    "version: '2'\nnum_requests: 10\naggregate_rate: 10\n")
+        (exp / "llm-d-inference-scheduler" / "pkg").mkdir(parents=True)
+        _write_text(exp / "llm-d-inference-scheduler" / "pkg" / "register.go", "")
+        (exp / "workspace").mkdir(parents=True)
+        return exp
+
+    def _patch(self, mod, fw, exp):
+        """Patch both REPO_ROOT and EXPERIMENT_ROOT to separate framework and experiment."""
+        mod.REPO_ROOT = fw
+        mod.EXPERIMENT_ROOT = exp
+
+    def test_init_resolves_files_from_experiment_root(self, tmp_path):
+        fw = self._make_framework(tmp_path)
+        exp = self._make_experiment(tmp_path)
+
+        import importlib
+        import pipeline.prepare as mod
+        importlib.reload(mod)
+        self._patch(mod, fw, exp)
+
+        from pipeline.lib.manifest import load_manifest
+        manifest = load_manifest(exp / "transfer.yaml")
+        run_dir = exp / "workspace" / "runs" / "test-run"
+
+        class Args:
+            force = False
+            run = "test-run"
+            manifest = str(exp / "transfer.yaml")
+            rebuild_context = False
+            experiment_root = str(exp)
+            pipeline_template = None
+
+        state = mod._phase_init(Args(), manifest, run_dir)
+        assert state.is_done("init")
+        assert state.scenario == "admission_control"
+
+    def test_env_defaults_resolved_from_experiment_root(self, tmp_path):
+        fw = self._make_framework(tmp_path)
+        exp = self._make_experiment(tmp_path)
+
+        import importlib
+        import pipeline.prepare as mod
+        importlib.reload(mod)
+        self._patch(mod, fw, exp)
+
+        from pipeline.lib.manifest import load_manifest
+        manifest = load_manifest(exp / "transfer.yaml")
+        resolved = mod._load_resolved_config(manifest)
+        assert resolved["path"] == "llm-d-inference-scheduler"
+
+    def test_workspace_created_in_experiment_root(self, tmp_path):
+        """run_dir should be under EXPERIMENT_ROOT, not REPO_ROOT."""
+        fw = self._make_framework(tmp_path)
+        exp = self._make_experiment(tmp_path)
+
+        import importlib
+        import pipeline.prepare as mod
+        importlib.reload(mod)
+        self._patch(mod, fw, exp)
+
+        from pipeline.lib.manifest import load_manifest
+        manifest = load_manifest(exp / "transfer.yaml")
+        run_dir = exp / "workspace" / "runs" / "test-run"
+
+        class Args:
+            force = False
+            run = "test-run"
+            manifest = str(exp / "transfer.yaml")
+            rebuild_context = False
+            experiment_root = str(exp)
+            pipeline_template = None
+
+        mod._phase_init(Args(), manifest, run_dir)
+        # State file should exist in experiment root, not framework root
+        assert (exp / "workspace" / "runs" / "test-run" / ".state.json").exists()
+        assert not (fw / "workspace").exists()
+
+
+# ── Baseline-only assembly ─────────────────────────────────────────────────
+
+class TestBaselineOnlyAssembly:
+    """Tests for baseline-only mode: no translation_output.json present.
+
+    These tests document the expected behavior when prepare.py assemble is
+    invoked without a prior translation step — producing only baseline
+    PipelineRuns and skipping treatment-specific logic.
+    """
+
+    def _setup_baseline_only_repo(self, repo):
+        """Set up repo with everything needed for assembly EXCEPT translation_output.json."""
         run_dir = repo / "workspace" / "runs" / "test-run"
         run_dir.mkdir(parents=True, exist_ok=True)
-        (run_dir / "translation_output.json").write_text(json.dumps({
+
+        # setup_config.json (written by setup.py)
+        setup_config = {"namespace": "sim2real-test", "workspaces": {}}
+        (repo / "workspace" / "setup_config.json").write_text(json.dumps(setup_config))
+
+        # baseline.yaml bundle (experiment root)
+        baseline_bundle = {
+            "scenario": [{"name": "baseline-scenario", "model": {"name": "test-model"}}]
+        }
+        _write_yaml(repo / "baseline.yaml", baseline_bundle)
+
+        # llm-d-benchmark submodule (git repo — needed for SHA detection)
+        benchmark = repo / "llm-d-benchmark"
+        benchmark.mkdir(parents=True, exist_ok=True)
+        _init_git_repo(benchmark)
+
+        return run_dir
+
+    def test_assembly_baseline_only_produces_only_baseline_pipelineruns(self, repo):
+        """When no translation_output.json exists, _phase_assembly should produce
+        only pipelinerun-*-baseline.yaml files, no cluster/treatment.yaml, and
+        mark_done('assembly', packages=['baseline']).
+        """
+        mod = _import_prepare_with_root(repo)
+        run_dir = self._setup_baseline_only_repo(repo)
+
+        manifest = dict(MINIMAL_MANIFEST)
+        resolved = mod._load_resolved_config(manifest)
+        state = StateMachine("test-run", "routing", run_dir)
+        state.mark_done("init")
+
+        class Args:
+            force = False
+
+        mod._phase_assembly(Args(), state, manifest, run_dir, resolved)
+
+        # Should mark done with baseline-only packages
+        assert state.is_done("assembly")
+        assert state.get_phase("assembly")["packages"] == ["baseline"]
+
+        # Should produce only baseline PipelineRuns
+        cluster_dir = run_dir / "cluster"
+        pr_files = list(cluster_dir.glob("pipelinerun-*.yaml"))
+        assert all("-baseline.yaml" in f.name for f in pr_files)
+        assert not any("-treatment.yaml" in f.name for f in pr_files)
+
+        # Should NOT produce cluster/treatment.yaml
+        assert not (cluster_dir / "treatment.yaml").exists()
+
+    def test_assembly_baseline_only_skips_epp_validation(self, repo):
+        """When run_metadata.json has NO registry key but no translation_output.json
+        exists, _phase_assembly should still succeed (EPP validation skipped).
+        """
+        mod = _import_prepare_with_root(repo)
+        run_dir = self._setup_baseline_only_repo(repo)
+
+        # Write run_metadata.json WITHOUT registry (would fail in full mode)
+        meta = {"repo_name": "llm-d-inference-scheduler"}
+        (run_dir / "run_metadata.json").write_text(json.dumps(meta))
+
+        manifest = dict(MINIMAL_MANIFEST)
+        resolved = mod._load_resolved_config(manifest)
+        state = StateMachine("test-run", "routing", run_dir)
+        state.mark_done("init")
+
+        class Args:
+            force = False
+
+        # Should succeed — EPP injection should be skipped in baseline-only mode
+        mod._phase_assembly(Args(), state, manifest, run_dir, resolved)
+        assert state.is_done("assembly")
+
+    def test_summary_baseline_only_does_not_crash(self, repo):
+        """_phase_summary should produce a reduced summary with 'Baseline-only'
+        and 'Translation skipped' text when translation_output.json is absent.
+        """
+        mod = _import_prepare_with_root(repo)
+        run_dir = self._setup_baseline_only_repo(repo)
+
+        manifest = dict(MINIMAL_MANIFEST)
+        resolved = mod._load_resolved_config(manifest)
+        state = StateMachine("test-run", "routing", run_dir)
+        state.mark_done("init")
+        state.mark_done("assembly", packages=["baseline"])
+
+        # Do NOT create translation_output.json
+
+        # Should NOT crash with FileNotFoundError
+        mod._phase_summary(state, manifest, run_dir, resolved)
+
+        assert state.is_done("summary")
+        summary_path = run_dir / "run_summary.md"
+        assert summary_path.exists()
+        content = summary_path.read_text()
+        assert "Baseline-only" in content or "baseline-only" in content.lower()
+        assert "Translation skipped" in content or "translation skipped" in content.lower()
+
+    def test_summary_full_mode_unchanged(self, repo):
+        """_phase_summary still works normally when translation_output.json IS present."""
+        mod = _import_prepare_with_root(repo)
+        run_dir = self._setup_baseline_only_repo(repo)
+
+        manifest = dict(MINIMAL_MANIFEST)
+        resolved = mod._load_resolved_config(manifest)
+        state = StateMachine("test-run", "routing", run_dir)
+        state.mark_done("init")
+        state.mark_done("translate", plugin_type="test-scorer", files_created=[])
+        state.mark_done("assembly", packages=["baseline", "treatment"])
+
+        # Write translation_output.json (full mode)
+        output = {
             "plugin_type": "test-scorer",
+            "files_created": ["pkg/plugins/scorer/test.go"],
+            "files_modified": ["pkg/plugins/register.go"],
+            "package": "scorer",
+            "test_commands": [["go", "test", "./..."]],
+            "config_kind": "EndpointPickerConfig",
             "treatment_config_generated": True,
-        }))
-        tc_yaml = "kind: EndpointPickerConfig\npluginType: test-scorer\n"
-        (run_dir / "generated").mkdir(parents=True, exist_ok=True)
-        (run_dir / "generated" / "treatment_config.yaml").write_text(tc_yaml)
-
-        manifest = dict(MINIMAL_MANIFEST)
-        resolved = MINIMAL_ENV_DEFAULTS["scenarios"]["routing"]
-        out_path = run_dir / "algorithm_values.yaml"
-
-        mod._generate_algorithm_values(manifest, resolved, out_path)
-        result = yaml.safe_load(out_path.read_text())
-        custom = (result["stack"]["gaie"]["treatment"]["helmValues"]
-                  ["inferenceExtension"]["pluginsCustomConfig"])
-        assert custom["custom-plugins.yaml"] == tc_yaml
-
-    def test_copies_baseline_config_when_not_generated(self, repo):
-        """treatment_config_generated=false → baseline EPP config copied to treatment."""
-        mod = _import_prepare_with_root(repo)
-        run_dir = repo / "workspace" / "runs" / "test-run"
-        run_dir.mkdir(parents=True, exist_ok=True)
-        (run_dir / "translation_output.json").write_text(json.dumps({
-            "plugin_type": "test-scorer",
-            "treatment_config_generated": False,
-        }))
-
-        baseline_cfg = {"custom-plugins.yaml": "baseline epp config"}
-        manifest = dict(MINIMAL_MANIFEST)
-        resolved = {
-            **MINIMAL_ENV_DEFAULTS["scenarios"]["routing"],
-            "stack": {
-                "gaie": {
-                    "baseline": {
-                        "helmValues": {
-                            "inferenceExtension": {
-                                "pluginsCustomConfig": baseline_cfg
-                            }
-                        }
-                    }
-                }
-            }
+            "description": "Test scorer plugin",
+            "register_file": "pkg/plugins/register.go",
         }
-        out_path = run_dir / "algorithm_values.yaml"
+        (run_dir / "translation_output.json").write_text(json.dumps(output))
 
-        mod._generate_algorithm_values(manifest, resolved, out_path)
-        result = yaml.safe_load(out_path.read_text())
-        custom = (result["stack"]["gaie"]["treatment"]["helmValues"]
-                  ["inferenceExtension"]["pluginsCustomConfig"])
-        assert custom == baseline_cfg
+        # Should work normally
+        mod._phase_summary(state, manifest, run_dir, resolved)
 
-    def test_raises_when_treatment_config_missing(self, repo):
-        """treatment_config_generated=true but no treatment_config.yaml → RuntimeError."""
+        assert state.is_done("summary")
+        summary_path = run_dir / "run_summary.md"
+        assert summary_path.exists()
+        content = summary_path.read_text()
+        assert "test-scorer" in content
+        assert "Test scorer plugin" in content
+
+    def test_validate_assembly_baseline_only_exits_cleanly(self, repo):
+        """_validate_assembly should return cleanly (not raise/exit) when
+        translation_output.json is absent.
+        """
         mod = _import_prepare_with_root(repo)
         run_dir = repo / "workspace" / "runs" / "test-run"
         run_dir.mkdir(parents=True, exist_ok=True)
-        (run_dir / "translation_output.json").write_text(json.dumps({
-            "plugin_type": "test-scorer",
-            "treatment_config_generated": True,
-        }))
+
+        resolved = {"repo": "github.com/llm-d/llm-d-inference-scheduler", "path": "llm-d-inference-scheduler", "kind": "EndpointPickerConfig"}
+
+        # Do NOT create translation_output.json
+        # Should return without raising or sys.exit
+        mod._validate_assembly(run_dir, resolved)
+
+    def test_cmd_assemble_no_translation_proceeds(self, repo):
+        """_cmd_assemble should NOT sys.exit(1) when translation_output.json is
+        missing; should proceed and produce baseline-only output.
+        """
+        mod = _import_prepare_with_root(repo)
+        run_dir = self._setup_baseline_only_repo(repo)
 
         manifest = dict(MINIMAL_MANIFEST)
-        resolved = MINIMAL_ENV_DEFAULTS["scenarios"]["routing"]
-        out_path = run_dir / "algorithm_values.yaml"
 
-        with pytest.raises(RuntimeError, match="generated/treatment_config.yaml"):
-            mod._generate_algorithm_values(manifest, resolved, out_path)
+        # Create state with init done (cmd_assemble loads from disk)
+        state = StateMachine("test-run", "routing", run_dir)
+        state.mark_done("init")
+        # Do NOT mark translate as done — that's the point of this test
 
-    def test_warns_when_no_baseline_and_not_generated(self, repo):
-        """treatment_config_generated=false, baseline has no EPP config → warning emitted."""
+        class Args:
+            force = False
+
+        # _cmd_assemble proceeds in baseline-only mode without translation.
+        mod._cmd_assemble(Args(), manifest, run_dir)
+
+        # Verify baseline-only output
+        cluster_dir = run_dir / "cluster"
+        prs = list(cluster_dir.glob("pipelinerun-*.yaml"))
+        assert all("-baseline.yaml" in f.name for f in prs)
+
+    def test_cmd_assemble_errors_when_translation_attempted_but_missing(self, repo):
+        """_cmd_assemble should sys.exit(1) when translate phase was attempted
+        (checkpoint_hits > 0) but translation_output.json is absent.
+        """
         mod = _import_prepare_with_root(repo)
-        run_dir = repo / "workspace" / "runs" / "test-run"
-        run_dir.mkdir(parents=True, exist_ok=True)
-        (run_dir / "translation_output.json").write_text(json.dumps({
-            "plugin_type": "test-scorer",
-            "treatment_config_generated": False,
-        }))
+        run_dir = self._setup_baseline_only_repo(repo)
 
         manifest = dict(MINIMAL_MANIFEST)
-        resolved = MINIMAL_ENV_DEFAULTS["scenarios"]["routing"]  # gaie.baseline has no pluginsCustomConfig
-        out_path = run_dir / "algorithm_values.yaml"
 
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            mod._generate_algorithm_values(manifest, resolved, out_path)
-        texts = [str(warning.message) for warning in w]
-        assert any("treatment pluginsCustomConfig" in t for t in texts)
+        # State with translate checkpoint_hits (translation was attempted)
+        state = StateMachine("test-run", "routing", run_dir)
+        state.mark_done("init")
+        state.increment("translate", "checkpoint_hits")
+
+        class Args:
+            force = False
+
+        with pytest.raises(SystemExit):
+            mod._cmd_assemble(Args(), manifest, run_dir)
 
 
-# ── _compile_cluster_packages ───────────────────────────────────────────────
+# ── Baseline-only (no algorithm in manifest) ──────────────────────────────
 
-class TestCompileClusterPackages:
-    def test_no_epp_yaml_generated(self, repo):
-        """epp.yaml must NOT be generated."""
+class TestBaselineOnlyNoAlgorithm:
+    """Tests for full prepare flow when manifest has no algorithm field."""
+
+    def _no_algo_manifest(self):
+        """Manifest without algorithm section."""
+        m = {k: v for k, v in MINIMAL_MANIFEST.items() if k not in ("algorithm", "algorithms")}
+        m["algorithms"] = []
+        return m
+
+    def test_phase_init_no_algorithm(self, repo):
+        """_phase_init succeeds when manifest has no algorithm field."""
         mod = _import_prepare_with_root(repo)
+        manifest = self._no_algo_manifest()
+        run_dir = repo / "workspace" / "runs" / "test-run"
+
+        class Args:
+            force = True
+            run = "test-run"
+            manifest = None
+            rebuild_context = False
+
+        state = mod._phase_init(Args(), manifest, run_dir)
+        assert state.is_done("init")
+
+    def test_phase_translate_skips_no_algorithm(self, repo):
+        """_phase_translate marks done immediately when no algorithm in manifest."""
+        mod = _import_prepare_with_root(repo)
+        manifest = self._no_algo_manifest()
         run_dir = repo / "workspace" / "runs" / "test-run"
         run_dir.mkdir(parents=True, exist_ok=True)
-        values_path = run_dir / "values.yaml"
-        values_path.write_text(yaml.dump({
-            "observe": {"workloads": [{"name": "wl1", "num_requests": 10}]},
-            "gaie": {"baseline": {}, "treatment": {}},
-        }))
-        setup_config = {"namespace": "sim2real"}
 
-        mod._compile_cluster_packages(run_dir, {}, values_path, setup_config)
+        resolved = mod._load_resolved_config(manifest)
+        state = StateMachine("test-run", "routing", run_dir)
+        state.mark_done("init")
 
-        assert not (run_dir / "cluster" / "baseline" / "epp.yaml").exists()
-        assert not (run_dir / "cluster" / "treatment" / "epp.yaml").exists()
+        context_path = run_dir / "context.md"
+        context_path.write_text("# Context")
 
-    def test_pipelinerun_yaml_per_phase(self, repo):
-        """One pipelinerun-{phase}.yaml per package (baseline and treatment)."""
-        from unittest.mock import patch as _patch
+        class Args:
+            force = False
+            manifest = None
+
+        mod._phase_translate(Args(), state, manifest, run_dir, resolved, context_path)
+        assert state.is_done("translate")
+        assert not (run_dir / "skill_input.json").exists()
+
+    def test_cmd_run_baseline_only_no_algorithm(self, repo):
+        """Full _cmd_run succeeds with no algorithm — baseline-only flow."""
         mod = _import_prepare_with_root(repo)
-        # Create tektonc_dir so the compile_pipeline branch is taken
-        (repo / "tektonc-data-collection" / "tektoncsample" / "sim2real").mkdir(parents=True)
+        manifest = self._no_algo_manifest()
+        # Empty workloads to skip PipelineRun generation (avoids setup_config dep)
+        manifest["workloads"] = []
+
+        # baseline.yaml must exist for assembly (needs scenario list for HF injection)
+        (repo / "baseline.yaml").write_text(yaml.dump({"scenario": [{"name": "test", "model": {"name": "test"}}]}))
+
+        # setup_config.json required for HF secret injection
+        ws_dir = repo / "workspace"
+        ws_dir.mkdir(parents=True, exist_ok=True)
+        (ws_dir / "setup_config.json").write_text(json.dumps({"namespace": "default"}))
+
         run_dir = repo / "workspace" / "runs" / "test-run"
         run_dir.mkdir(parents=True, exist_ok=True)
-        values_path = run_dir / "values.yaml"
-        values_path.write_text(yaml.dump({
-            "observe": {
-                "workloads": [
-                    {"name": "bursty", "num_requests": 50},
-                    {"name": "steady", "num_requests": 100},
-                ]
-            },
-        }))
-        setup_config = {"namespace": "test-ns"}
 
-        _MINIMAL_PIPELINE = {
-            "apiVersion": "tekton.dev/v1", "kind": "Pipeline",
-            "metadata": {"name": "test-pipeline"},
-            "spec": {
-                "params": [
-                    {"name": "workloadName", "type": "string"},
-                    {"name": "workloadSpec", "type": "string"},
-                ],
-                "tasks": [{"name": "run-task", "taskRef": {"name": "t"},
-                            "params": [{"name": "workloadName",
-                                        "value": "$(params.workloadName)"}]}],
-            },
-        }
+        class Args:
+            force = False
+            run = "test-run"
+            manifest = None
+            rebuild_context = False
 
-        def _fake_compile(template_dir, values_path, phase, out_dir):
-            out_dir.mkdir(parents=True, exist_ok=True)
-            (out_dir / f"{phase}-pipeline.yaml").write_text(
-                yaml.dump(_MINIMAL_PIPELINE, default_flow_style=False)
-            )
-            return True
+        # Mock _phase_gate to avoid interactive input
+        original_gate = mod._phase_gate
+        mod._phase_gate = lambda *a, **kw: None
+        try:
+            mod._cmd_run(Args(), manifest, run_dir)
+        finally:
+            mod._phase_gate = original_gate
 
-        with _patch.object(mod, "compile_pipeline", side_effect=_fake_compile):
-            mod._compile_cluster_packages(run_dir, {}, values_path, setup_config)
+        # Verify: translate was skipped, summary was written
+        assert (run_dir / "run_summary.md").exists()
+        assert not (run_dir / "skill_input.json").exists()
+        summary = (run_dir / "run_summary.md").read_text()
+        assert "Baseline-only" in summary
 
-        for phase in ["baseline", "treatment"]:
-            assert (run_dir / "cluster" / phase / f"pipelinerun-{phase}.yaml").exists()
-
-    def test_pipelinerun_content_is_valid_k8s(self, repo):
-        """PipelineRun YAML is a valid Tekton PipelineRun resource."""
-        from unittest.mock import patch as _patch
+    def test_phase_summary_with_stale_translation_output(self, repo):
+        """_phase_summary doesn't crash when translation_output.json exists but algorithm is absent."""
         mod = _import_prepare_with_root(repo)
-        # Create tektonc_dir so the compile_pipeline branch is taken
-        (repo / "tektonc-data-collection" / "tektoncsample" / "sim2real").mkdir(parents=True)
-        run_dir = repo / "workspace" / "runs" / "my-run"
+        manifest = self._no_algo_manifest()
+        run_dir = repo / "workspace" / "runs" / "test-run"
         run_dir.mkdir(parents=True, exist_ok=True)
-        values_path = run_dir / "values.yaml"
-        values_path.write_text(yaml.dump({
-            "observe": {"workloads": [{"name": "wl1", "num_requests": 5}]},
-        }))
-        setup_config = {"namespace": "myns"}
 
-        _MINIMAL_PIPELINE = {
-            "apiVersion": "tekton.dev/v1", "kind": "Pipeline",
-            "metadata": {"name": "test-pipeline"},
-            "spec": {
-                "params": [
-                    {"name": "workloadName", "type": "string"},
-                    {"name": "workloadSpec", "type": "string"},
-                ],
-                "tasks": [{"name": "run-task", "taskRef": {"name": "t"},
-                            "params": [{"name": "workloadName",
-                                        "value": "$(params.workloadName)"}]}],
-            },
+        # Simulate stale translation_output.json from a prior run
+        output = {
+            "plugin_type": "old-scorer",
+            "files_created": ["old.go"],
+            "files_modified": [],
+            "description": "Stale translation",
         }
+        (run_dir / "translation_output.json").write_text(json.dumps(output))
 
-        def _fake_compile(template_dir, values_path, phase, out_dir):
-            out_dir.mkdir(parents=True, exist_ok=True)
-            (out_dir / f"{phase}-pipeline.yaml").write_text(
-                yaml.dump(_MINIMAL_PIPELINE, default_flow_style=False)
-            )
-            return True
+        state = StateMachine("test-run", "routing", run_dir)
+        state.mark_done("init")
+        state.mark_done("translate", mode="baseline-only")
+        state.mark_done("assembly", packages=["baseline"])
 
-        with _patch.object(mod, "compile_pipeline", side_effect=_fake_compile):
-            mod._compile_cluster_packages(run_dir, {}, values_path, setup_config)
+        resolved = {}
 
-        pr_path = run_dir / "cluster" / "baseline" / "pipelinerun-baseline.yaml"
-        pr = yaml.safe_load(pr_path.read_text())
-        assert pr["apiVersion"] == "tekton.dev/v1"
-        assert pr["kind"] == "PipelineRun"
-        assert pr["metadata"]["namespace"] == "myns"
-        params = {p["name"]: p["value"] for p in pr["spec"]["params"]}
-        assert params["workloadName-baseline-wl1"] == "wl1"
-        assert params["namespace"] == "myns"
+        # Should not crash even with stale translation_output.json
+        mod._phase_summary(state, manifest, run_dir, resolved)
+        summary = (run_dir / "run_summary.md").read_text()
+        assert "Source: `N/A`" in summary

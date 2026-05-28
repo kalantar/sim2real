@@ -1,0 +1,134 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: sim2real
+spec:
+  params:
+    - name: experimentId
+      type: string
+    - name: runName
+      type: string
+    - name: namespace
+      type: string
+    - name: phase
+      type: string
+    - name: scenarioContent
+      type: string
+    - name: specContent
+      type: string
+    - name: workloadName
+      type: string
+    - name: workloadSpec
+      type: string
+    - name: benchmarkGitRepoUrl
+      type: string
+    - name: benchmarkGitCommit
+      type: string
+    - name: blisGitRepoUrl
+      type: string
+    - name: blisGitCommit
+      type: string
+    - name: model
+      type: string
+    - name: skipTeardown
+      type: string
+      default: "false"
+  workspaces:
+    - name: source
+    - name: data-storage
+  tasks:
+    - name: install-llmdbenchmark
+      taskRef:
+        name: install-llmdbenchmark
+      workspaces:
+        - name: source
+          workspace: source
+      params:
+        - name: git_repo_url
+          value: "$(params.benchmarkGitRepoUrl)"
+        - name: git_commit
+          value: "$(params.benchmarkGitCommit)"
+
+    - name: install-blis
+      taskRef:
+        name: install-blis
+      workspaces:
+        - name: source
+          workspace: source
+      params:
+        - name: git_repo_url
+          value: "$(params.blisGitRepoUrl)"
+        - name: git_commit
+          value: "$(params.blisGitCommit)"
+
+    - name: llmdbenchmark-standup
+      runAfter: ["install-llmdbenchmark"]
+      taskRef:
+        name: llmdbenchmark-standup
+      workspaces:
+        - name: source
+          workspace: source
+        - name: data
+          workspace: data-storage
+      params:
+        - name: namespace
+          value: "$(params.namespace)"
+        - name: scenario_content
+          value: "$(params.scenarioContent)"
+        - name: spec_content
+          value: "$(params.specContent)"
+        - name: plans_dir
+          value: "$(params.runName)/plans/$(params.phase)/$(params.workloadName)"
+        - name: smoketest_delay
+          value: "30"
+
+    - name: run-workload-blis-observe-binary
+      runAfter: ["llmdbenchmark-standup", "install-blis"]
+      taskRef:
+        name: run-workload-blis-observe-binary
+      workspaces:
+        - name: source
+          workspace: source
+        - name: data
+          workspace: data-storage
+      params:
+        - name: model
+          value: "$(params.model)"
+        - name: endpoint
+          value: "$(tasks.llmdbenchmark-standup.results.endpoint)"
+        - name: workloadSpec
+          value: "$(params.workloadSpec)"
+        - name: resultsDir
+          value: "$(params.runName)/$(params.phase)/$(params.workloadName)"
+
+    - name: collect-results
+      runAfter: ["run-workload-blis-observe-binary"]
+      taskRef:
+        name: collect-results
+      workspaces:
+        - name: data
+          workspace: data-storage
+      params:
+        - name: resultsDir
+          value: "$(params.runName)/$(params.phase)/$(params.workloadName)"
+        - name: namespace
+          value: "$(params.namespace)"
+
+  finally:
+    - name: llmdbenchmark-teardown
+      when:
+        - input: "$(params.skipTeardown)"
+          operator: notin
+          values: ["true"]
+      taskRef:
+        name: llmdbenchmark-teardown
+      workspaces:
+        - name: source
+          workspace: source
+      params:
+        - name: namespace
+          value: "$(params.namespace)"
+        - name: scenario_content
+          value: "$(params.scenarioContent)"
+        - name: spec_content
+          value: "$(params.specContent)"

@@ -2,10 +2,10 @@
 """sim2real prepare — 6-phase state machine for algorithm transfer.
 
 Phases:
-  1. Init       — load manifest v2, resolve scenario config, validate prerequisites
+  1. Init       — load manifest v3, validate prerequisites
   2. Context    — assemble + cache context document
   3. Translate  — checkpoint: write skill_input.json, check for translation_output.json
-  4. Assembly   — treatment config, algorithm values, merge-values, cluster packages
+  4. Assembly   — assemble resolved scenarios, generate PipelineRuns
   5. Summary    — generate run_summary.md
   6. Gate       — human review: [d]eploy / [e]dit / [q]uit
 
@@ -16,7 +16,6 @@ import argparse
 import json
 import subprocess
 import sys
-import warnings
 import yaml
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,11 +28,40 @@ if str(_REPO_ROOT) not in sys.path:
 from pipeline.lib.manifest import load_manifest, ManifestError
 from pipeline.lib.state_machine import StateMachine
 from pipeline.lib.context_builder import build_context
-from pipeline.lib.values import _deep_merge, merge_values
-from pipeline.lib.tekton import compile_pipeline, make_experiment_pipeline, make_phase_pipeline, make_standby_pipeline
+from pipeline.lib.tekton import make_pipelinerun_scenario
+from pipeline.lib.assemble import assemble_packages, AssemblyError, inject_hf_secret_name
+from pipeline.lib.epp import inject_epp_image
 
 # ── Repo layout ──────────────────────────────────────────────────────────────
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# Overridden in main() via --experiment-root (defaults to cwd).
+EXPERIMENT_ROOT = REPO_ROOT
+
+
+
+
+def _resolve_manifest_default(experiment_root: Path) -> Path:
+    """Resolve default manifest path: transfer.yaml first, then config/transfer.yaml."""
+    direct = experiment_root / "transfer.yaml"
+    if direct.exists():
+        return direct
+    return experiment_root / "config" / "transfer.yaml"
+
+
+
+
+def _display_path(p: Path) -> str:
+    """Return p relative to EXPERIMENT_ROOT if possible, else REPO_ROOT, else absolute."""
+    try:
+        return str(p.relative_to(EXPERIMENT_ROOT))
+    except ValueError:
+        pass
+    try:
+        return str(p.relative_to(REPO_ROOT))
+    except ValueError:
+        return str(p)
+
 
 # ── Color helpers ────────────────────────────────────────────────────────────
 _tty = sys.stdout.isatty()
@@ -67,37 +95,55 @@ def _default_run_name() -> str:
 
 
 def _load_setup_config() -> dict:
-    path = REPO_ROOT / "workspace" / "setup_config.json"
+    path = EXPERIMENT_ROOT / "workspace" / "setup_config.json"
+    if not path.exists():
+        path = REPO_ROOT / "workspace" / "setup_config.json"
     if path.exists():
         return json.loads(path.read_text())
     return {}
 
 
 def _load_resolved_config(manifest: dict) -> dict:
-    """Load env_defaults, merge common + scenario, return resolved config."""
-    env_path = REPO_ROOT / "config" / "env_defaults.yaml"
-    env_data = yaml.safe_load(env_path.read_text())
-    common = env_data.get("common", {})
-    scenarios = env_data.get("scenarios", {})
-    scenario = manifest["scenario"]
-    if scenario not in scenarios:
-        err(f"Scenario '{scenario}' not found in env_defaults.yaml. "
-            f"Available: {list(scenarios.keys())}")
-        sys.exit(1)
-    return _deep_merge(common, scenarios[scenario])
+    """Build resolved config from manifest component section."""
+    return dict(manifest.get("component", {}))
 
 
-def _get_submodule_shas() -> dict[str, str]:
-    """Get HEAD commit SHAs for submodules."""
+def _get_submodule_shas(component_path: str = "") -> dict[str, str]:
+    """Get HEAD commit SHAs for submodules.
+
+    Args:
+        component_path: Relative path to the component submodule (from manifest).
+                        Resolved relative to EXPERIMENT_ROOT (with REPO_ROOT fallback).
+    """
     shas = {}
-    for name, path in [("inference-sim", "inference-sim"),
-                       ("llm-d-inference-scheduler", "llm-d-inference-scheduler")]:
-        sub = REPO_ROOT / path
+    # Framework submodules (always at REPO_ROOT)
+    for name in ("inference-sim", "llm-d-benchmark"):
+        sub = REPO_ROOT / name
         if sub.exists() and (sub / ".git").exists():
-            result = run(["git", "rev-parse", "HEAD"], capture=True, cwd=sub)
-            shas[name] = result.stdout.strip()
+            try:
+                result = run(["git", "rev-parse", "HEAD"], capture=True, cwd=sub)
+                shas[name] = result.stdout.strip()
+            except subprocess.CalledProcessError:
+                shas[name] = "unknown"
         else:
             shas[name] = "unknown"
+
+    # Component submodule (from manifest, EXPERIMENT_ROOT with fallback)
+    if component_path:
+        sub = EXPERIMENT_ROOT / component_path
+        if not sub.exists():
+            sub = REPO_ROOT / component_path
+        if sub.exists() and (sub / ".git").exists():
+            try:
+                result = run(["git", "rev-parse", "HEAD"], capture=True, cwd=sub)
+                shas["component"] = result.stdout.strip()
+            except subprocess.CalledProcessError:
+                shas["component"] = "unknown"
+        else:
+            shas["component"] = "unknown"
+    else:
+        shas["component"] = "unknown"
+
     return shas
 
 
@@ -117,39 +163,74 @@ def _phase_init(args, manifest: dict, run_dir: Path) -> StateMachine:
     scenario = manifest["scenario"]
     resolved = _load_resolved_config(manifest)
 
-    # Validate prerequisites
-    if not (REPO_ROOT / manifest["algorithm"]["source"]).exists():
-        err(f"algorithm.source not found: {manifest['algorithm']['source']}")
-        sys.exit(1)
+    # Validate prerequisites — per-algorithm files
+    for algo in manifest.get("algorithms", []):
+        src = algo.get("source")
+        if src and not (EXPERIMENT_ROOT / src).exists():
+            err(f"algorithm '{algo['name']}' source not found: {src}")
+            sys.exit(1)
+        algo_config = algo.get("config")
+        if algo_config and not (EXPERIMENT_ROOT / algo_config).exists():
+            err(f"algorithm '{algo['name']}' config not found: {algo_config}")
+            sys.exit(1)
 
-    baseline_sim_config = manifest["baseline"]["sim"]["config"]
-    if baseline_sim_config and not (REPO_ROOT / baseline_sim_config).exists():
-        err(f"baseline.sim.config not found: {baseline_sim_config}")
-        sys.exit(1)
-
-    algo_config = manifest["algorithm"].get("config")
-    if algo_config and not (REPO_ROOT / algo_config).exists():
-        err(f"algorithm.config not found: {algo_config}")
-        sys.exit(1)
-
-    # Validate baseline.real.config if present
-    baseline_real_config = manifest["baseline"]["real"].get("config")
-    if baseline_real_config is not None:
-        if not (REPO_ROOT / baseline_real_config).exists():
-            err(f"baseline.real.config not found: {baseline_real_config}")
+    # Validate prerequisites — per-baseline files
+    for bl in manifest.get("baselines", []):
+        sim_cfg = bl.get("sim", {}).get("config")
+        if sim_cfg and not (EXPERIMENT_ROOT / sim_cfg).exists():
+            err(f"baseline '{bl['name']}' sim.config not found: {sim_cfg}")
+            sys.exit(1)
+        real_cfg = bl.get("real", {}).get("config")
+        if real_cfg and not (EXPERIMENT_ROOT / real_cfg).exists():
+            err(f"baseline '{bl['name']}' real.config not found: {real_cfg}")
+            sys.exit(1)
+        scenario_file = bl.get("scenario")
+        if scenario_file and not (EXPERIMENT_ROOT / scenario_file).exists():
+            err(f"baseline '{bl['name']}' scenario not found: {scenario_file}")
             sys.exit(1)
 
     for wl in manifest["workloads"]:
-        if not (REPO_ROOT / wl).exists():
+        if not (EXPERIMENT_ROOT / wl).exists():
             err(f"Workload not found: {wl}")
             sys.exit(1)
 
-    # Validate target repo exists
-    target = resolved.get("target", {})
-    target_repo = target.get("repo", "")
-    if target_repo and not (REPO_ROOT / target_repo).exists():
-        err(f"Target repo not found: {target_repo}")
-        sys.exit(1)
+    # Validate component submodule
+    target_path = resolved.get("path", "")
+    component_ref = manifest.get("component", {}).get("ref")
+    if target_path:
+        comp_dir = EXPERIMENT_ROOT / target_path
+        if not comp_dir.exists():
+            if component_ref:
+                err(f"Component repo not found: {target_path}\n"
+                    f"  Initialize with: git submodule update --init {target_path}")
+            else:
+                err(f"Component repo not found: {target_path}")
+            sys.exit(1)
+        elif component_ref:
+            if not (comp_dir / ".git").exists():
+                err(f"component.ref is set but {target_path} is not a git repository.\n"
+                    f"  Cannot verify ref {component_ref}.\n"
+                    f"  Initialize with: git submodule update --init {target_path}")
+                sys.exit(1)
+            try:
+                result = run(["git", "rev-parse", "HEAD"], capture=True, cwd=comp_dir)
+            except subprocess.CalledProcessError:
+                err(f"Cannot determine HEAD in {target_path} (git rev-parse failed).\n"
+                    f"  The .git directory may be corrupted.")
+                sys.exit(1)
+            actual_sha = result.stdout.strip()
+            try:
+                result_ref = run(["git", "rev-parse", component_ref], capture=True, cwd=comp_dir)
+                expected_sha = result_ref.stdout.strip()
+            except subprocess.CalledProcessError:
+                err(f"Cannot resolve component.ref '{component_ref}' in {target_path}.\n"
+                    f"  Ensure the ref exists: cd {target_path} && git fetch")
+                sys.exit(1)
+            if actual_sha != expected_sha:
+                warn(f"Component ref mismatch in {target_path}:\n"
+                     f"  manifest component.ref: {component_ref}\n"
+                     f"  checked-out HEAD:       {actual_sha}\n"
+                     f"  Update with: cd {target_path} && git checkout {component_ref}")
 
     run_name = args.run or _load_setup_config().get("current_run", _default_run_name())
     state = StateMachine(run_name, scenario, run_dir)
@@ -173,19 +254,19 @@ def _phase_context(args, state: StateMachine, manifest: dict, run_dir: Path) -> 
     # Resolve context files from manifest
     context_files = []
     for f in manifest.get("context", {}).get("files", []):
-        full = REPO_ROOT / f
+        full = EXPERIMENT_ROOT / f
         if not full.exists():
             err(f"Context file not found: {f}")
             sys.exit(1)
         context_files.append(full)
 
-    shas = _get_submodule_shas()
+    shas = _get_submodule_shas(manifest.get("component", {}).get("path", ""))
 
     path, cached = build_context(
         context_files=context_files,
         submodule_shas=shas,
         scenario=manifest["scenario"],
-        cache_dir=REPO_ROOT / "workspace" / "context",
+        cache_dir=EXPERIMENT_ROOT / "workspace" / "context",
     )
 
     state.mark_done("context", hash=path.stem, cached=cached, path=str(path),
@@ -198,38 +279,61 @@ def _phase_context(args, state: StateMachine, manifest: dict, run_dir: Path) -> 
 
 def _phase_translate(args, state: StateMachine, manifest: dict, run_dir: Path,
                      resolved: dict, context_path: Path):
-    """Phase 3: Write skill_input.json, check for translation_output.json."""
+    """Phase 3: Write skill_input.json (or skip if no algorithm in manifest)."""
     step(3, "Translation Checkpoint")
 
     if state.is_done("translate") and not args.force:
         info("[skip] Translation already complete")
         return
 
-    target = resolved.get("target", {})
+    if not manifest.get("algorithms"):
+        info("[skip] No algorithm in manifest — baseline-only mode")
+        state.mark_done("translate", mode="baseline-only")
+        return
+
     build_cfg = resolved.get("build", {})
-    config_cfg = resolved.get("config", {})
 
     # Build commands: common commands (skill determines test scope)
-    commands = [list(c) for c in build_cfg.get("commands", [])]
+    commands = [" ".join(c) if isinstance(c, list) else c for c in build_cfg.get("commands", [])]
 
     # Write skill_input.json
+    first_bl = manifest.get("baselines", [{}])[0]
+    first_algo = manifest.get("algorithms", [{}])[0]
+
     skill_input = {
         "run_name": state.run_name,
-        "run_dir": str(run_dir.relative_to(REPO_ROOT)),
+        "run_dir": _display_path(run_dir),
         "scenario": manifest["scenario"],
-        "context_path": str(context_path.relative_to(REPO_ROOT)
-                           if context_path.is_relative_to(REPO_ROOT)
-                           else context_path),
-        "manifest_path": str(getattr(args, "manifest", None) or "config/transfer.yaml"),
-        "algorithm_source": manifest["algorithm"]["source"],
-        "algorithm_config": manifest["algorithm"].get("config"),
-        "baseline_sim_config": manifest["baseline"]["sim"].get("config"),
-        "baseline_real_config": manifest["baseline"]["real"].get("config"),
-        "baseline_real_notes": manifest["baseline"]["real"].get("notes", ""),
-        "target": {"repo": target.get("repo", "")},
+        "context_path": _display_path(context_path),
+        "manifest_path": str(getattr(args, "manifest", None) or "transfer.yaml"),
+        "baselines": [
+            {
+                "name": bl["name"],
+                "sim_config": bl.get("sim", {}).get("config"),
+                "real_config": bl.get("real", {}).get("config"),
+                "real_notes": bl.get("real", {}).get("notes", ""),
+            }
+            for bl in manifest.get("baselines", [])
+        ],
+        "algorithms": [
+            {
+                "name": algo["name"],
+                "source": algo["source"],
+                "config": algo.get("config"),
+                "defaults": algo["defaults"],
+            }
+            for algo in manifest.get("algorithms", [])
+        ],
+        # Legacy fields for backward compat with existing skill
+        "algorithm_source": first_algo.get("source", ""),
+        "algorithm_config": first_algo.get("config"),
+        "baseline_sim_config": first_bl.get("sim", {}).get("config"),
+        "baseline_real_config": first_bl.get("real", {}).get("config"),
+        "baseline_real_notes": first_bl.get("real", {}).get("notes", ""),
+        "target": {"repo": resolved.get("repo", "")},
         "build_commands": commands,
-        "config_kind": config_cfg.get("kind", ""),
-        "hints": manifest.get("hints", {"text": "", "files": []}),
+        "config_kind": resolved.get("kind", ""),
+        "context": {"text": manifest.get("context", {}).get("text", "")},
     }
     skill_input_path = run_dir / "skill_input.json"
     skill_input_path.write_text(json.dumps(skill_input, indent=2))
@@ -240,7 +344,7 @@ def _phase_translate(args, state: StateMachine, manifest: dict, run_dir: Path,
         output = json.loads(output_path.read_text())
         # Validate required fields
         for f in ["plugin_type", "files_created", "files_modified",
-                  "package", "test_commands", "config_kind", "helm_path",
+                  "package", "test_commands", "config_kind",
                   "treatment_config_generated", "description"]:
             if f not in output:
                 err(f"translation_output.json missing required field: {f}")
@@ -264,7 +368,7 @@ def _phase_translate(args, state: StateMachine, manifest: dict, run_dir: Path,
     print(f"\n{'='*60}")
     print("  TRANSLATION CHECKPOINT")
     print(f"{'='*60}")
-    print(f"\n  skill_input.json written to: {skill_input_path.relative_to(REPO_ROOT)}")
+    print(f"\n  skill_input.json written to: {_display_path(skill_input_path)}")
     print("\n  Next step: run the /sim2real-translate skill in Claude Code,")
     print("  then re-run: python pipeline/prepare.py")
     if hits >= 3:
@@ -277,294 +381,236 @@ def _phase_translate(args, state: StateMachine, manifest: dict, run_dir: Path,
 
 def _phase_assembly(args, state: StateMachine, manifest: dict, run_dir: Path,
                     resolved: dict):
-    """Phase 4: Assemble cluster artifacts from translation output."""
+    """Phase 4: Assemble resolved scenarios from baseline/treatment + overlays."""
     step(4, "Assembly")
 
     if state.is_done("assembly") and not args.force:
         info("[skip] Assembly already complete")
         return
 
-    # 4a: Validate treatment config
-    tc_path = run_dir / "generated" / "treatment_config.yaml"
-    if tc_path.exists():
-        tc = yaml.safe_load(tc_path.read_text())
-        expected_kind = resolved.get("config", {}).get("kind")
-        if expected_kind and isinstance(tc, dict) and tc.get("kind") != expected_kind:
-            err(f"treatment_config kind mismatch: got '{tc.get('kind')}', expected '{expected_kind}'")
+    # 4b: Build baseline and algorithm specs from manifest
+    baselines_spec = []
+    for bl in manifest.get("baselines", []):
+        scenario_path = bl.get("scenario")
+        if scenario_path:
+            scenario_path = EXPERIMENT_ROOT / scenario_path
+        else:
+            scenario_path = EXPERIMENT_ROOT / "baseline.yaml"
+        if not scenario_path.exists():
+            err(f"Baseline scenario not found: {scenario_path}")
             sys.exit(1)
-        ok("Treatment config validated")
+        spec = {"name": bl["name"], "scenario_path": scenario_path}
+        defaults_path = bl.get("defaults")
+        if defaults_path:
+            dp = EXPERIMENT_ROOT / defaults_path
+            if not dp.exists():
+                err(f"Baseline defaults not found: {dp}")
+                sys.exit(1)
+            spec["defaults_path"] = dp
+        baselines_spec.append(spec)
 
-    # 4b: Baseline config — from generated/baseline_config.yaml (if skill ran),
-    # otherwise falls back to env_defaults (scenarios.<scenario>.gaie.baseline)
+    algorithms_spec = []
+    for algo in manifest.get("algorithms", []):
+        scenario_path = algo.get("scenario")
+        if scenario_path:
+            scenario_path = EXPERIMENT_ROOT / scenario_path
+        else:
+            fallback = EXPERIMENT_ROOT / "treatment.yaml"
+            scenario_path = fallback if fallback.exists() else None
+        algorithms_spec.append({
+            "name": algo["name"],
+            "scenario_path": scenario_path,
+            "defaults": algo["defaults"],
+        })
 
-    # 4c: Generate algorithm_values.yaml
-    alg_values_path = run_dir / "algorithm_values.yaml"
-    _generate_algorithm_values(manifest, resolved, alg_values_path)
-    ok(f"Algorithm values: {alg_values_path.relative_to(REPO_ROOT)}")
+    translation_output_path = run_dir / "translation_output.json"
+    translation_happened = translation_output_path.exists()
+    generated_dir = run_dir / "generated"
 
-    # 4c.5: Re-inject EPP image if one was already built for this run
-    meta_path = run_dir / "run_metadata.json"
-    if meta_path.exists():
-        meta = json.loads(meta_path.read_text())
-        epp_image = meta.get("epp_image", "")
-        if epp_image:
-            # epp_image is "hub/name:tag" — split on last colon for tag, then last slash for hub
-            tag = epp_image.rsplit(":", 1)[-1] if ":" in epp_image else ""
-            repo = epp_image.rsplit(":", 1)[0] if ":" in epp_image else epp_image
-            name = repo.rsplit("/", 1)[-1] if "/" in repo else repo
-            hub = repo.rsplit("/", 1)[0] if "/" in repo else ""
-            alg_values = yaml.safe_load(alg_values_path.read_text())
-            (alg_values
-                .setdefault("stack", {})
-                .setdefault("gaie", {})
-                .setdefault("treatment", {})
-                .setdefault("helmValues", {})
-                .setdefault("inferenceExtension", {})
-                ["image"]) = {"hub": hub, "name": name, "tag": tag, "pullPolicy": "Always"}
-            alg_values_path.write_text(yaml.dump(alg_values, default_flow_style=False, allow_unicode=True))
-            ok(f"EPP image re-injected: {epp_image}")
-
-    # 4d: Merge values
-    values_path = run_dir / "values.yaml"
     try:
-        merge_values(
-            REPO_ROOT / "config" / "env_defaults.yaml",
-            alg_values_path,
-            values_path,
-            scenario=manifest["scenario"],
+        packages = assemble_packages(
+            baselines=baselines_spec,
+            algorithms=algorithms_spec if translation_happened else [],
+            generated_dir=generated_dir,
+            overlays_expected=translation_happened,
         )
-    except (FileNotFoundError, yaml.YAMLError, ValueError, OSError) as e:
-        err(f"merge-values failed: {e}")
+    except AssemblyError as e:
+        err(str(e))
         sys.exit(1)
-    ok(f"Values merged: {values_path.relative_to(REPO_ROOT)}")
 
-    # 4e: Compile cluster YAMLs per package
+    # 4b.5: Inject EPP images into packages (only when translation occurred)
+    if translation_happened:
+        meta_path = run_dir / "run_metadata.json"
+        if not meta_path.exists():
+            err("run_metadata.json absent — cannot inject EPP image. Re-run setup.py.")
+            sys.exit(1)
+        try:
+            meta = json.loads(meta_path.read_text())
+        except json.JSONDecodeError as e:
+            err(f"run_metadata.json is not valid JSON: {e}. Re-run setup.py.")
+            sys.exit(1)
+        registry = meta.get("registry", "")
+        repo_name = meta.get("repo_name", "llm-d-inference-scheduler")
+        run_name_tag = run_dir.name
+        if not registry:
+            err("run_metadata.json has no registry — cannot determine EPP image. Re-run setup.py.")
+            sys.exit(1)
+        for pkg in packages:
+            if pkg.kind == "algorithm":
+                injected = inject_epp_image(pkg.resolved, registry, repo_name, run_name_tag)
+                if injected:
+                    ok(f"EPP image injected into {pkg.name}: {registry}/{repo_name}:{run_name_tag}")
+                else:
+                    err(f"{pkg.name} has no 'scenario' entries — EPP image cannot be injected.")
+                    sys.exit(1)
+
+        # Inject baseline EPP image into baseline packages
+        component_path = manifest.get("component", {}).get("path", "")
+        if component_path:
+            comp_dir = EXPERIMENT_ROOT / component_path
+            if comp_dir.exists() and (comp_dir / ".git").exists():
+                from pipeline.lib.ensure_image import compute_source_hash
+                baseline_tag = compute_source_hash(comp_dir)[:8]
+                from pipeline.lib.epp import inject_image_ref
+                for pkg in packages:
+                    if pkg.kind == "baseline":
+                        injected = inject_image_ref(
+                            pkg.resolved, f"{registry}/{repo_name}", baseline_tag
+                        )
+                        if injected:
+                            ok(f"Baseline EPP image: {registry}/{repo_name}:{baseline_tag} → {pkg.name}")
+            else:
+                info(f"Skipping baseline EPP injection: {component_path} not found or not a git repo")
+        else:
+            info("Skipping baseline EPP injection: no component.path in manifest")
+
+    # 4b.6: Inject huggingface.secretName into all packages
     setup_config = _load_setup_config()
-    _compile_cluster_packages(run_dir, resolved, values_path, setup_config)
+    if not setup_config:
+        err("setup_config.json not found. Run setup.py first to bootstrap cluster resources.")
+        sys.exit(1)
+    hf_secret_name = setup_config.get("hf_secret_name", "hf-secret")
+    for pkg in packages:
+        if not inject_hf_secret_name(pkg.resolved, hf_secret_name):
+            err(f"{pkg.name} has no 'scenario' entries — huggingface.secretName cannot be injected.")
+            sys.exit(1)
 
-    # 4f: Verify generated/ directory (created by translation skill)
-    _verify_generated_dir(run_dir)
+    # 4c: Write resolved scenarios
+    cluster_dir = run_dir / "cluster"
+    cluster_dir.mkdir(parents=True, exist_ok=True)
 
-    # 4g: validate-assembly
-    _validate_assembly(run_dir, resolved)
+    for pkg in packages:
+        out = cluster_dir / f"{pkg.name}.yaml"
+        out.write_text(yaml.dump(pkg.resolved, default_flow_style=False, allow_unicode=True))
 
-    state.mark_done("assembly", packages=["baseline", "treatment"])
-    ok("Assembly complete")
+    ok(f"Resolved scenarios: {_display_path(cluster_dir)}")
 
-
-def _generate_algorithm_values(manifest: dict, resolved: dict, out_path: Path):
-    """Generate algorithm_values.yaml from manifest + resolved config."""
-    # Parse workloads
+    # 4d: Load workloads
     workloads = []
-    multiplier = resolved.get("observe", {}).get("request_multiplier", 1)
-    for wl_path_str in manifest["workloads"]:
-        wl_path = REPO_ROOT / wl_path_str
-        wl_data = yaml.safe_load(wl_path.read_text())
+    for wl_path_str in manifest.get("workloads", []):
+        wl_path = EXPERIMENT_ROOT / wl_path_str
+        if not wl_path.exists():
+            err(f"Workload file not found: {wl_path}")
+            sys.exit(1)
+        try:
+            wl_data = yaml.safe_load(wl_path.read_text())
+        except yaml.YAMLError as e:
+            err(f"Invalid YAML in workload file {wl_path}: {e}")
+            sys.exit(1)
+        if not isinstance(wl_data, dict):
+            err(f"Workload file is not a YAML mapping: {wl_path}")
+            sys.exit(1)
         if "name" not in wl_data and "workload_name" not in wl_data:
             wl_data["workload_name"] = Path(wl_path_str).stem
-        if multiplier > 1 and "num_requests" in wl_data:
-            wl_data["num_requests"] = int(wl_data["num_requests"] * multiplier)
         workloads.append(wl_data)
 
-    # Resolve inference-sim image tag for blis observe container
-    inference_sim_dir = REPO_ROOT / "inference-sim"
-    blis_tag_result = run(
-        ["git", "describe", "--tags"],
-        check=False, capture=True, cwd=inference_sim_dir,
-    )
-    blis_tag = blis_tag_result.stdout.strip() if blis_tag_result.returncode == 0 else ""
-
-    # Build algorithm values
-    observe = {"workloads": workloads}
-    if blis_tag:
-        observe["image"] = f"ghcr.io/inference-sim/blis:{blis_tag}"
-    # Set GAIE_RELEASE_NAME_POSTFIX so the kv-events-config endpoint resolves correctly.
-    # The EPP service is named sim2real-{run_name}-gaie-epp by the Tekton deploy-gaie task.
-    run_name = out_path.parent.name
-    alg_values = {
-        "stack": {
-            "model": {
-                "helmValues": {
-                    "decode": {
-                        "containers": [{"env": [{"name": "GAIE_RELEASE_NAME_POSTFIX",
-                                                 "value": f"sim2real-{run_name}"}]}],
-                    },
-                },
-            },
-        },
-        "observe": observe,
-    }
-
-    # Embed treatment EPP config based on treatment_config_generated flag
-    output_path = out_path.parent / "translation_output.json"
-    if output_path.exists():
-        translation_output = json.loads(output_path.read_text())
-        treatment_config_generated = translation_output.get("treatment_config_generated", False)
-    else:
-        treatment_config_generated = False
-
-    if treatment_config_generated:
-        tc_path = out_path.parent / "generated" / "treatment_config.yaml"
-        if not tc_path.exists():
-            raise RuntimeError(
-                f"treatment_config_generated=true but generated/treatment_config.yaml "
-                f"not found at {tc_path}")
-        tc_content = tc_path.read_text()
-        (alg_values["stack"]
-         .setdefault("gaie", {})
-         .setdefault("treatment", {})
-         .setdefault("helmValues", {})
-         .setdefault("inferenceExtension", {})
-         ["pluginsCustomConfig"]) = {"custom-plugins.yaml": tc_content}
-    else:
-        # treatment_config_generated=false — copy baseline EPP config to treatment slot
-        baseline_cfg = (resolved
-                        .get("stack", {})
-                        .get("gaie", {})
-                        .get("baseline", {})
-                        .get("helmValues", {})
-                        .get("inferenceExtension", {})
-                        .get("pluginsCustomConfig", {}))
-        if baseline_cfg:
-            (alg_values["stack"]
-             .setdefault("gaie", {})
-             .setdefault("treatment", {})
-             .setdefault("helmValues", {})
-             .setdefault("inferenceExtension", {})
-             ["pluginsCustomConfig"]) = baseline_cfg
-        else:
-            warnings.warn(
-                "treatment_config_generated=false and baseline has no EPP config; "
-                "treatment pluginsCustomConfig will be empty",
-                UserWarning,
-                stacklevel=2,
-            )
-
-    # Embed baseline EPP config if derived in Phase 2 (overrides env_defaults static value)
-    # Skip if file is empty — empty baseline means "use EPP defaults, no custom config"
-    baseline_cfg_path = out_path.parent / "generated" / "baseline_config.yaml"
-    if baseline_cfg_path.exists() and baseline_cfg_path.read_text().strip():
-        bc_content = baseline_cfg_path.read_text()
-        (alg_values["stack"]
-         .setdefault("gaie", {})
-         .setdefault("baseline", {})
-         .setdefault("helmValues", {})
-         .setdefault("inferenceExtension", {})
-         ["pluginsCustomConfig"]) = {"custom-plugins.yaml": bc_content}
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(yaml.dump(alg_values, default_flow_style=False, sort_keys=False))
-
-
-def _compile_cluster_packages(run_dir: Path, resolved: dict, values_path: Path,
-                               setup_config: dict):
-    """Compile cluster YAMLs organized by package (baseline, treatment)."""
-    cluster_dir = run_dir / "cluster"
-    namespace = setup_config.get("namespace", "default")
-    if not setup_config.get("namespace"):
-        warn("namespace not found in setup_config.json; using 'default'")
-
-    values = yaml.safe_load(values_path.read_text())
-    workloads = values.get("observe", {}).get("workloads", [])
-
-    # Inject workload_name from manifest file stems when workload dicts lack a name.
-    # values.yaml embeds workload data without preserving source filenames, so we
-    # cross-reference the manifest by index to get a stable, human-readable name.
-    si_path = run_dir / "skill_input.json"
-    if si_path.exists():
-        try:
-            si = json.loads(si_path.read_text())
-            manifest = yaml.safe_load(Path(si["manifest_path"]).read_text()) or {}
-            wl_paths = manifest.get("workloads", [])
-            for i, wl in enumerate(workloads):
-                if "name" not in wl and "workload_name" not in wl and i < len(wl_paths):
-                    wl["workload_name"] = Path(wl_paths[i]).stem
-        except Exception:
-            pass
-
-    tektonc_dir = REPO_ROOT / "tektonc-data-collection" / "tektoncsample" / "sim2real"
-    run_name = run_dir.name
-    compiled_pipelines: dict = {}
-
-    for package in ["baseline", "treatment"]:
-        pkg_dir = cluster_dir / package
-        pkg_dir.mkdir(parents=True, exist_ok=True)
-
-        # Compile Tekton Pipeline YAML for this phase
-        pr_path = pkg_dir / f"{package}-pipeline.yaml"
-        if tektonc_dir.exists():
-            ok_flag = compile_pipeline(tektonc_dir, values_path, package, pkg_dir)
-            if not ok_flag:
-                warn(f"compile_pipeline failed for {package}; writing stub")
-                pr_path.write_text(f"# compile_pipeline failed for {package}\n")
-        else:
-            pr_path.write_text(f"# PipelineRun stub for {package}\n"
-                               f"# tektonc-data-collection not available\n")
-
-        # Load compiled pipeline for the experiment combiner and per-package pipelineruns
-        if pr_path.exists() and not pr_path.read_text().startswith("#"):
-            try:
-                compiled_pipelines[package] = yaml.safe_load(pr_path.read_text())
-            except Exception:
-                pass
-
-        # Remove any stale per-workload pipelineruns from earlier pipeline versions
-        for stale in pkg_dir.glob("pipelinerun-workload-*.yaml"):
-            stale.unlink()
-
-        # Generate a Pipeline + PipelineRun for standalone package execution.
-        # When no workloads are defined, emit a standby pipeline: stack deploys
-        # normally, then a sleep-infinity task runs indefinitely.  spec.finally
-        # (teardown) only fires on cancel/stop, never on normal completion.
-        if package in compiled_pipelines:
-            if workloads:
-                phase_pipeline, phase_pr = make_phase_pipeline(
-                    package, workloads, compiled_pipelines[package],
-                    run_name, namespace,
-                    workspace_bindings=setup_config.get("workspaces"),
-                )
-            else:
-                phase_pipeline, phase_pr = make_standby_pipeline(
-                    package, compiled_pipelines[package],
-                    run_name, namespace,
-                    workspace_bindings=setup_config.get("workspaces"),
-                )
-            (pkg_dir / f"sim2real-{package}-pipeline.yaml").write_text(
-                yaml.dump(phase_pipeline, default_flow_style=False, allow_unicode=True)
-            )
-            (pkg_dir / f"pipelinerun-{package}.yaml").write_text(
-                yaml.dump(phase_pr, default_flow_style=False, allow_unicode=True)
-            )
-
-    # No workloads → standby pipelines only; no combined experiment pipeline.
     if not workloads:
-        ok(f"Standby pipelines generated (no workloads): {cluster_dir.relative_to(REPO_ROOT)}")
+        warn("No workloads defined — cannot generate PipelineRuns")
+        done_packages = [pkg.name for pkg in packages]
+        state.mark_done("assembly", packages=done_packages)
         return
 
-    # Generate the single sequential experiment pipeline (all baselines then all
-    # treatments, one after another). This replaces the per-workload PipelineRuns.
-    if len(compiled_pipelines) == 2:
-        phase_workloads = (
-            [("baseline", wl.get("name", wl.get("workload_name", f"workload-{i}")), wl)
-             for i, wl in enumerate(workloads)]
-            + [("treatment", wl.get("name", wl.get("workload_name", f"workload-{i}")), wl)
-               for i, wl in enumerate(workloads)]
-        )
-        experiment_pipeline, experiment_pr = make_experiment_pipeline(
-            phase_workloads, compiled_pipelines, run_name, namespace,
-            workspace_bindings=setup_config.get("workspaces"),
-        )
-        exp_dir = cluster_dir / "experiment"
-        exp_dir.mkdir(parents=True, exist_ok=True)
-        (exp_dir / "experiment-pipeline.yaml").write_text(
-            yaml.dump(experiment_pipeline, default_flow_style=False, allow_unicode=True))
-        (exp_dir / "pipelinerun-experiment.yaml").write_text(
-            yaml.dump(experiment_pr, default_flow_style=False, allow_unicode=True))
-        ok(f"Experiment pipeline: {exp_dir.relative_to(REPO_ROOT)}/")
-    else:
-        warn("Could not generate experiment pipeline: missing compiled phase pipelines")
+    # 4e: Pipeline resource
+    run_name = run_dir.name
+    pipeline_name = manifest.get("pipeline", {}).get("name", "sim2real")
 
-    ok(f"Cluster packages: {cluster_dir.relative_to(REPO_ROOT)}")
+    # 4f: Generate PipelineRuns
+    namespace = setup_config.get("namespace", "default")
+    ws_bindings = setup_config.get("workspaces") or {}
+    shas = _get_submodule_shas(manifest.get("component", {}).get("path", ""))
+    benchmark_commit = shas.get("llm-d-benchmark", "")
+    blis_commit = shas.get("inference-sim", "")
+    benchmark_sub = REPO_ROOT / "llm-d-benchmark"
+    benchmark_repo_url = ""
+    if benchmark_sub.exists() and (benchmark_sub / ".git").exists():
+        try:
+            result = run(["git", "remote", "get-url", "origin"], capture=True, cwd=benchmark_sub)
+            benchmark_repo_url = result.stdout.strip()
+        except subprocess.CalledProcessError as e:
+            warn(f"git remote get-url origin failed in {benchmark_sub}: {e}")
+    blis_sub = REPO_ROOT / "inference-sim"
+    blis_repo_url = ""
+    if blis_sub.exists() and (blis_sub / ".git").exists():
+        try:
+            result = run(["git", "remote", "get-url", "origin"], capture=True, cwd=blis_sub)
+            blis_repo_url = result.stdout.strip()
+        except subprocess.CalledProcessError as e:
+            warn(f"git remote get-url origin failed in {blis_sub}: {e}")
+
+    missing_params = []
+    if not benchmark_repo_url:
+        missing_params.append("benchmark_repo_url (llm-d-benchmark submodule)")
+    if not blis_repo_url:
+        missing_params.append("blis_repo_url (inference-sim submodule)")
+    if missing_params:
+        if translation_happened:
+            err(f"Critical PipelineRun params resolved to empty: {', '.join(missing_params)}. "
+                "Initialize submodules with: git submodule update --init")
+            sys.exit(1)
+        else:
+            warn(f"Submodule params not available: {', '.join(missing_params)}. "
+                 "Generated PipelineRuns will FAIL on cluster until submodules are initialized: "
+                 "git submodule update --init")
+    first_baseline = next((p for p in packages if p.kind == "baseline"), packages[0])
+    scenarios_list = first_baseline.resolved.get("scenario", [])
+    model_name = scenarios_list[0].get("model", {}).get("name", "") if scenarios_list else ""
+
+    for pkg in packages:
+        scenario_content = yaml.dump(pkg.resolved, default_flow_style=False, allow_unicode=True)
+        for wl in workloads:
+            wl_name = wl.get("name", wl.get("workload_name", "unknown"))
+            safe_wl = wl_name.replace("_", "-")
+
+            pr = make_pipelinerun_scenario(
+                phase=pkg.name,
+                workload=wl,
+                run_name=run_name,
+                namespace=namespace,
+                pipeline_name=pipeline_name,
+                scenario_content=scenario_content,
+                workspace_bindings=ws_bindings if ws_bindings else None,
+                benchmark_git_commit=benchmark_commit,
+                benchmark_git_repo_url=benchmark_repo_url,
+                blis_git_commit=blis_commit,
+                blis_git_repo_url=blis_repo_url,
+                model=model_name,
+            )
+            pr_path = cluster_dir / f"pipelinerun-{safe_wl}-{pkg.name}.yaml"
+            pr_path.write_text(yaml.dump(pr, default_flow_style=False, allow_unicode=True))
+
+    ok(f"PipelineRuns: {len(workloads) * len(packages)} generated")
+
+    # 4g: Verify generated dir (only when translation produced files)
+    if translation_happened:
+        _verify_generated_dir(run_dir)
+
+    # 4h: validate-assembly
+    algo_names = [pkg.name for pkg in packages if pkg.kind == "algorithm"] if translation_happened else None
+    _validate_assembly(run_dir, resolved, algorithm_packages=algo_names)
+
+    done_packages = [pkg.name for pkg in packages]
+    state.mark_done("assembly", packages=done_packages)
+    ok("Assembly complete")
 
 
 def _verify_generated_dir(run_dir: Path):
@@ -575,66 +621,74 @@ def _verify_generated_dir(run_dir: Path):
         warn("Continuing without generated file copies.")
         return
 
-    output = json.loads((run_dir / "translation_output.json").read_text())
+    output_path = run_dir / "translation_output.json"
+    if not output_path.exists():
+        warn("translation_output.json not found — skipping generated file verification")
+        return
+
+    try:
+        output = json.loads(output_path.read_text())
+    except json.JSONDecodeError:
+        err("translation_output.json is not valid JSON — translation may have failed. "
+            "Re-run the /sim2real-translate skill.")
+        sys.exit(1)
+
     for f in output.get("files_created", []) + output.get("files_modified", []):
         if not (generated_dir / Path(f).name).exists():
             warn(f"generated/ missing: {Path(f).name}")
 
 
-def _validate_assembly(run_dir: Path, resolved: dict):
+def _validate_assembly(run_dir: Path, resolved: dict, algorithm_packages: list[str] | None = None):
     """Phase 4g: Deterministic consistency checks."""
-    output = json.loads((run_dir / "translation_output.json").read_text())
+    output_path = run_dir / "translation_output.json"
+    if not output_path.exists():
+        return
+    try:
+        output = json.loads(output_path.read_text())
+    except json.JSONDecodeError:
+        warn("translation_output.json is not valid JSON — skipping validation")
+        return
     plugin_type = output["plugin_type"]
-    config_cfg = resolved.get("config", {})
-    target = resolved.get("target", {})
+    target_path = resolved.get("path", "")
     treatment_config_generated = output.get("treatment_config_generated", True)
 
     errors = []
 
-    # Check 1: plugin_type in register_file (skip if null — rewrite mode)
+    # Check 1: plugin_type literal exists in register_file's directory OR in files_created
     register_file = output.get("register_file")
     if register_file is not None:
-        register_path = REPO_ROOT / target.get("repo", "") / register_file
+        register_path = EXPERIMENT_ROOT / target_path / register_file
         if register_path.exists():
-            # Search register_file's directory recursively: Go plugins use constants
-            # defined in sibling files (e.g. AdaptiveV2Type = "adaptive-v2-scorer" in
-            # adaptive_v2.go, referenced as scorer.AdaptiveV2Type in register.go).
-            plugins_dir = register_path.parent
+            search_files = list(register_path.parent.rglob("*.go"))
+            for f in output.get("files_created", []):
+                p = EXPERIMENT_ROOT / target_path / f
+                if p.exists() and p.suffix == ".go":
+                    search_files.append(p)
             found = any(
                 plugin_type in f.read_text()
-                for f in plugins_dir.rglob("*.go")
+                for f in search_files
             )
             if not found:
                 errors.append(
-                    f"plugin_type '{plugin_type}' not found in {register_file} or adjacent plugin files")
+                    f"plugin_type '{plugin_type}' not found in {register_file} or plugin files")
         else:
             errors.append(f"register_file not found on disk: {register_file}")
 
-    # Check 2: plugin_type string present inside treatment-pipeline.yaml
-    # (EPP config is embedded in the compiled Pipeline YAML — no separate epp.yaml)
+    # Check 2: plugin_type string present inside algorithm scenario YAMLs
     # Skip when treatment_config_generated=False: baseline config is copied instead,
-    # and plugin_type may not appear in the treatment pipeline YAML.
+    # and plugin_type may not appear in the treatment YAML.
     if treatment_config_generated:
-        pipeline_yaml = run_dir / "cluster" / "treatment" / "treatment-pipeline.yaml"
-        if pipeline_yaml.exists():
-            if plugin_type not in pipeline_yaml.read_text():
-                errors.append(
-                    f"plugin_type '{plugin_type}' not found in treatment-pipeline.yaml")
+        check_names = algorithm_packages or ["treatment"]
+        for pkg_name in check_names:
+            pkg_yaml = run_dir / "cluster" / f"{pkg_name}.yaml"
+            if pkg_yaml.exists():
+                if plugin_type not in pkg_yaml.read_text():
+                    errors.append(
+                        f"plugin_type '{plugin_type}' not found in {pkg_name}.yaml")
 
-    # Check 3: treatment_config kind matches scenario (only if custom config generated)
-    if treatment_config_generated and config_cfg.get("kind"):
-        tc_path = run_dir / "generated" / "treatment_config.yaml"
-        if tc_path.exists():
-            tc = yaml.safe_load(tc_path.read_text())
-            if isinstance(tc, dict) and tc.get("kind") != config_cfg["kind"]:
-                errors.append(
-                    f"treatment_config kind '{tc.get('kind')}' != expected "
-                    f"'{config_cfg['kind']}'")
-
-    # Check 4: all files_created exist in target repo
-    target_repo = target.get("repo", "")
+    # Check 3: all files_created exist in target repo
     for f in output.get("files_created", []):
-        if target_repo and not (REPO_ROOT / target_repo / f).exists():
+        if target_path and not (EXPERIMENT_ROOT / target_path / f).exists():
             errors.append(f"files_created entry missing on disk: {f}")
 
     if errors:
@@ -655,59 +709,72 @@ def _phase_summary(state: StateMachine, manifest: dict, run_dir: Path, resolved:
         info("[skip] Summary already complete")
         return
 
-    output = json.loads((run_dir / "translation_output.json").read_text())
-    translate_meta = state.get_phase("translate")
+    translation_output_path = run_dir / "translation_output.json"
 
-    lines = [
-        f"**Run Summary: `{state.run_name}`**",
-        f"Generated: {datetime.now(timezone.utc).isoformat()} | Scenario: {manifest['scenario']}",
-        "",
-        "**Algorithm**",
-        f"- Source: `{manifest['algorithm']['source']}`",
-        f"- Description: {output.get('description', 'N/A')}",
-        "",
-        "**Translation**",
-        f"- Plugin type: `{output['plugin_type']}`",
-        f"- Files created: {', '.join(f'`{f}`' for f in output.get('files_created', []))}",
-        f"- Files modified: {', '.join(f'`{f}`' for f in output.get('files_modified', []))}",
-    ]
+    if translation_output_path.exists():
+        output = json.loads(translation_output_path.read_text())
+        translate_meta = state.get_phase("translate")
 
-    if translate_meta.get("review_rounds"):
-        lines.append(f"- Review: {translate_meta.get('consensus', 'N/A')} "
-                     f"after {translate_meta['review_rounds']} rounds")
+        lines = [
+            f"**Run Summary: `{state.run_name}`**",
+            f"Generated: {datetime.now(timezone.utc).isoformat()} | Scenario: {manifest['scenario']}",
+            "",
+            "**Algorithm**",
+            f"- Source: `{(manifest.get('algorithms') or [{}])[0].get('source', 'N/A')}`",
+            f"- Description: {output.get('description', 'N/A')}",
+            "",
+            "**Translation**",
+            f"- Plugin type: `{output['plugin_type']}`",
+            f"- Files created: {', '.join(f'`{f}`' for f in output.get('files_created', []))}",
+            f"- Files modified: {', '.join(f'`{f}`' for f in output.get('files_modified', []))}",
+        ]
+
+        if translate_meta.get("review_rounds"):
+            lines.append(f"- Review: {translate_meta.get('consensus', 'N/A')} "
+                         f"after {translate_meta['review_rounds']} rounds")
+    else:
+        baselines_str = ", ".join(bl["name"] for bl in manifest.get("baselines", []))
+        lines = [
+            f"**Run Summary: `{state.run_name}`**",
+            f"Generated: {datetime.now(timezone.utc).isoformat()} | Scenario: {manifest['scenario']}",
+            "",
+            f"**Mode:** Baseline-only ({baselines_str})" if baselines_str else "**Mode:** Baseline-only (no translation)",
+        ]
 
     # Baseline vs Treatment config comparison
     lines.extend(["", "**Packages**", ""])
     cluster_dir = run_dir / "cluster"
-    exp_pr = cluster_dir / "experiment" / "pipelinerun-experiment.yaml"
-    if exp_pr.exists():
-        lines.append(f"- `{exp_pr}` (sequential)")
-    elif cluster_dir.exists():
-        for pkg_dir in sorted(cluster_dir.iterdir()):
-            if pkg_dir.is_dir() and any(pkg_dir.glob("pipelinerun-*.yaml")):
-                for p in sorted(pkg_dir.glob("pipelinerun-*.yaml")):
-                    lines.append(f"- `{p}`")
+    if cluster_dir.exists():
+        for p in sorted(cluster_dir.glob("pipelinerun-*.yaml")):
+            lines.append(f"- `{p}`")
 
     # Workloads
     lines.extend(["", "**Workloads**", ""])
-    multiplier = resolved.get("observe", {}).get("request_multiplier", 1)
     for wl in manifest["workloads"]:
         wl_name = Path(wl).stem
-        lines.append(f"- {wl_name} (x{multiplier})")
+        lines.append(f"- {wl_name}")
 
     # Checklist
-    lines.extend([
-        "", "**Checklist**",
-        "- [x] Translation complete",
-        "- [x] Assembly complete",
-        "- [x] validate-assembly passed",
-        "",
-    ])
+    if translation_output_path.exists():
+        lines.extend([
+            "", "**Checklist**",
+            "- [x] Translation complete",
+            "- [x] Assembly complete",
+            "- [x] validate-assembly passed",
+            "",
+        ])
+    else:
+        lines.extend([
+            "", "**Checklist**",
+            "- [-] Translation skipped (baseline-only)",
+            "- [x] Assembly complete",
+            "",
+        ])
 
     summary_path = run_dir / "run_summary.md"
     summary_path.write_text("\n".join(lines))
     state.mark_done("summary")
-    ok(f"Summary: {summary_path.relative_to(REPO_ROOT)}")
+    ok(f"Summary: {_display_path(summary_path)}")
 
 
 # ── Phase 6: Gate ────────────────────────────────────────────────────────────
@@ -754,7 +821,7 @@ def _cmd_run(args, manifest, run_dir):
     _phase_assembly(args, state, manifest, run_dir, resolved)
     _phase_summary(state, manifest, run_dir, resolved)
     _phase_gate(state, run_dir)
-    ok("Pipeline complete. Deploy with: python pipeline/deploy.py")
+    ok("Pipeline complete. Deploy with: python <repo-root>/pipeline/deploy.py")
 
 
 def _cmd_context(args, manifest, run_dir):
@@ -765,16 +832,22 @@ def _cmd_context(args, manifest, run_dir):
 
 
 def _cmd_assemble(args, manifest, run_dir):
-    """Re-run assembly from existing translation output."""
+    """Re-run assembly (baseline-only if no translation output exists)."""
     try:
         state = StateMachine.load(run_dir)
     except FileNotFoundError:
         err("No state file. Run prepare.py first.")
         sys.exit(1)
 
-    if not state.is_done("translate"):
-        err("Cannot assemble: translation not complete. Run /sim2real-translate first.")
-        sys.exit(1)
+    baseline_only = not (run_dir / "translation_output.json").exists()
+    if baseline_only:
+        translate_phase = state.get_phase("translate")
+        if translate_phase.get("checkpoint_hits"):
+            err("Translation was attempted but translation_output.json is missing. "
+                "Re-run /sim2real-translate or remove the translate phase from state "
+                "to proceed in baseline-only mode.")
+            sys.exit(1)
+        warn("No translation output — producing baseline-only PipelineRuns")
 
     resolved = _load_resolved_config(manifest)
     state.reset("assembly")
@@ -782,18 +855,18 @@ def _cmd_assemble(args, manifest, run_dir):
     state.reset("gate")
     _phase_assembly(args, state, manifest, run_dir, resolved)
     _phase_summary(state, manifest, run_dir, resolved)
-    _phase_gate(state, run_dir)
+    if not baseline_only:
+        _phase_gate(state, run_dir)
 
 
 def _cmd_validate_assembly(args, manifest, run_dir):
     """Run validate-assembly checks standalone."""
-    required = ["translation_output.json"]
-    for name in required:
-        if not (run_dir / name).exists():
-            err(f"Required file missing: {name}. Run translation skill first.")
-            sys.exit(1)
+    if not (run_dir / "translation_output.json").exists():
+        info("Baseline-only run — no treatment validation needed")
+        return
     resolved = _load_resolved_config(manifest)
-    _validate_assembly(run_dir, resolved)
+    algo_names = [a["name"] for a in manifest.get("algorithms", []) if a]
+    _validate_assembly(run_dir, resolved, algorithm_packages=algo_names or None)
 
 
 def _cmd_status(run_dir):
@@ -830,9 +903,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--rebuild-context", action="store_true", dest="rebuild_context",
                    help="Force context cache rebuild")
     p.add_argument("--manifest", metavar="PATH",
-                   help="Path to transfer.yaml (default: config/transfer.yaml)")
+                   help="Path to transfer.yaml (default: transfer.yaml)")
     p.add_argument("--run", metavar="NAME",
                    help="Override run name")
+    p.add_argument("--experiment-root", metavar="PATH", dest="experiment_root",
+                   help="Root of the experiment repo (default: current directory)")
 
     sub = p.add_subparsers(dest="command")
     sub.add_parser("context", help="Rebuild context cache only")
@@ -847,7 +922,10 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
 
-    manifest_path = args.manifest or str(REPO_ROOT / "config" / "transfer.yaml")
+    global EXPERIMENT_ROOT
+    EXPERIMENT_ROOT = Path(args.experiment_root).resolve() if args.experiment_root else Path.cwd()
+
+    manifest_path = args.manifest or str(_resolve_manifest_default(EXPERIMENT_ROOT))
     try:
         manifest = load_manifest(manifest_path)
     except ManifestError as e:
@@ -856,7 +934,7 @@ def main():
 
     setup_config = _load_setup_config()
     run_name = args.run or setup_config.get("current_run", _default_run_name())
-    run_dir = REPO_ROOT / "workspace" / "runs" / run_name
+    run_dir = EXPERIMENT_ROOT / "workspace" / "runs" / run_name
 
     cmd = args.command
     if cmd == "status":
